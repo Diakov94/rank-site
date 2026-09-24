@@ -133,7 +133,6 @@ input[type="search"]:focus {
 .card h2 { margin: 0 0 12px; font-size: 18px; }
 .card h3 { margin: 16px 0 10px; font-size: 15px; opacity: 0.95; }
 .card-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-.small { font-size: 12px; opacity: 0.78; }
 
 /* ========== Buttons ========== */
 .btn {
@@ -255,6 +254,12 @@ tbody tr.active { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(
   text-align: left;
   white-space: nowrap;
 }
+.hist-reset-col {
+  flex: 0 0 60px;
+  font-size: 11px;
+  opacity: 0.5;
+  text-align: center;
+}
 .hist-rank {
   flex: 1;
   font-size: 12px;
@@ -310,11 +315,6 @@ tbody tr.active { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(
 .ach-badge--link img { border-color: rgba(53, 210, 110, 0.7); box-shadow: 0 0 8px rgba(53, 210, 110, 0.25); }
 .ach-badge--link:hover img { border-color: rgba(53, 210, 110, 1); box-shadow: 0 0 16px rgba(53, 210, 110, 0.5); }
 
-/* ========== Telegram share button ========== */
-.tg-share-btn { font-size: 12px; padding: 6px 10px; opacity: 0.7; transition: opacity var(--t) var(--ease), background var(--t) var(--ease); }
-.tg-share-btn:hover { opacity: 1; background: rgba(41,182,246,0.12); border-color: rgba(41,182,246,0.4); color: #29b6f6; }
-.tg-share-btn:disabled { opacity: 0.45; cursor: not-allowed; }
-
 /* ========== Footer ========== */
 footer { padding: 14px 0 20px; text-align: center; opacity: 0.7; border-top: 1px solid var(--footer-border); font-size: 13px; }
 
@@ -355,7 +355,6 @@ footer { padding: 14px 0 20px; text-align: center; opacity: 0.7; border-top: 1px
 .mini-row { display: flex; align-items: center; justify-content: center; gap: 6px; margin-bottom: 4px; }
 .mini-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 .mini-group { font-size: 12px; opacity: 0.8; }
-.mini-delta { font-size: 12px; opacity: 0.65; }
 
 /* ========== Compare button ========== */
 .cmp-btn {

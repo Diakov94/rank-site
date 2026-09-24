@@ -8,8 +8,8 @@
 const CONFIG = Object.freeze({
   DATA_URL:
     "https://script.google.com/macros/s/AKfycbxkLrAorAf8PMAB3Wu9vBv7DIcjj9tj6W4KrnuEVYMvrV563bWQ0clgsultApJnEOy0/exec",
-  RATING_DIGITS: 1,
-  DELTA_DIGITS: 1,
+  RATING_DIGITS: 2,
+  DELTA_DIGITS: 2,
   CHART_ANIM_MS: 600,
 });
 
@@ -54,7 +54,6 @@ const els = {
 
   profileTitle:  $("profileTitle"),
   currentRating: $("currentRating"),
-  pointsCount:   $("pointsCount"),
 
   history:       $("history"),
   chart:         $("chart"),
@@ -134,8 +133,6 @@ async function init() {
 
   setupChartHover();
 
-  document.getElementById("tgShareBtn")?.addEventListener("click", sendLeaderboardToTelegram);
-
   els.compareClose?.addEventListener("click", closeCompareModal);
   els.compareModal?.querySelector(".compare-backdrop")?.addEventListener("click", closeCompareModal);
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeCompareModal(); });
@@ -145,47 +142,9 @@ async function init() {
   await loadGroups();
   await loadData();
   handleDeepLink();
-}
 
-/* ================== TELEGRAM SHARE ================== */
-async function sendLeaderboardToTelegram() {
-  const token  = localStorage.getItem("tg_bot_token");
-  const chatId = localStorage.getItem("tg_chat_id");
-  if (!token || !chatId) {
-    alert("Configure Telegram settings in the Admin panel first (Admin → 📱 Telegram tab).");
-    return;
-  }
-  if (typeof html2canvas === "undefined") {
-    alert("html2canvas not loaded yet, please wait a moment and try again.");
-    return;
-  }
-  const btn = document.getElementById("tgShareBtn");
-  const originalText = btn?.textContent || "📷 Telegram";
-  if (btn) { btn.disabled = true; btn.textContent = "Sending…"; }
-  try {
-    const card = document.getElementById("leaderboardCard");
-    const canvas = await html2canvas(card, {
-      backgroundColor: "#0b0f14",
-      scale: 2,
-      useCORS: true,
-      logging: false,
-    });
-    const blob = await new Promise((res) => canvas.toBlob(res, "image/png"));
-    const form = new FormData();
-    form.append("chat_id", chatId);
-    form.append("photo", blob, "leaderboard.png");
-    const res  = await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, { method: "POST", body: form });
-    const data = await res.json();
-    if (data.ok) {
-      if (btn) { btn.textContent = "✓ Sent!"; setTimeout(() => { btn.textContent = originalText; btn.disabled = false; }, 2500); }
-    } else {
-      alert("Telegram error: " + (data.description || "unknown error"));
-      if (btn) { btn.textContent = originalText; btn.disabled = false; }
-    }
-  } catch (err) {
-    alert("Error: " + err.message);
-    if (btn) { btn.textContent = originalText; btn.disabled = false; }
-  }
+  // Auto-refresh every 10 minutes — re-read from Google Sheets
+  setInterval(() => loadData(), 10 * 60 * 1000);
 }
 
 /* ================== BACK TO TOP ================== */
@@ -206,31 +165,29 @@ function initBackToTop() {
 async function loadData() {
   setLoading(true);
   try {
-    const [dataResult, hiddenResult] = await Promise.allSettled([
-      loadJSONP(CONFIG.DATA_URL),
+    const [engineResult, hiddenResult] = await Promise.allSettled([
+      buildRatings(),
       fetch(
         `${SUPABASE.URL}/rest/v1/hidden_players?select=nick`,
         { headers: { apikey: SUPABASE.KEY, Authorization: `Bearer ${SUPABASE.KEY}` } }
       ).then((r) => r.json()),
     ]);
 
-    if (dataResult.status === "rejected") throw dataResult.reason;
+    if (engineResult.status === "rejected") throw engineResult.reason;
 
-    const data = dataResult.value;
+    const { leaderboard, history } = engineResult.value;
     const hiddenRows = hiddenResult.status === "fulfilled" && Array.isArray(hiddenResult.value)
       ? hiddenResult.value
       : [];
     state.hiddenNicks = new Set(hiddenRows.map((r) => r.nick));
 
-    state.players = (data?.players ?? []).map((p) => ({
-      nick: String(p.nick),
-      series: (p.series ?? [])
-        .slice()
-        .sort((a, b) => a.date.localeCompare(b.date)),
+    state.players = leaderboard.map((p) => ({
+      nick: p.nickname,
+      series: (history[p.nickname] ?? []).slice().sort((a, b) => a.date.localeCompare(b.date)),
     }));
     buildGlobalRanking();
 
-    // Set default date range to current month
+    // Set default date range to last 7 days
     if (!state.dateFrom && !state.dateTo) {
       let lastDate = "";
       state.players.forEach((p) => {
@@ -238,16 +195,20 @@ async function loadData() {
         if (d > lastDate) lastDate = d;
       });
       if (lastDate) {
-        const monthStart = lastDate.slice(0, 7) + "-01";
-        state.dateFrom = monthStart;
+        const end = new Date(lastDate + "T00:00:00");
+        const start = new Date(end);
+        start.setDate(start.getDate() - 6);
+        const startStr = start.toISOString().slice(0, 10);
+        state.dateFrom = startStr;
         state.dateTo   = lastDate;
-        if (els.dateFrom) els.dateFrom.value = monthStart;
+        if (els.dateFrom) els.dateFrom.value = startStr;
         if (els.dateTo)   els.dateTo.value   = lastDate;
       }
     }
 
     renderTable();
     autoSelectTop();
+
   } catch (err) {
     console.error("Data load failed:", err);
     if (els.tbody) {
@@ -308,7 +269,10 @@ function buildGlobalRanking() {
       delta1: calcDelta(p.series, 1),
       delta7: calcMonthDelta(p.series, 7),
     }))
-    .sort((a, b) => (b.rating ?? -Infinity) - (a.rating ?? -Infinity));
+    .sort((a, b) => {
+      const delta = (b.rating ?? -Infinity) - (a.rating ?? -Infinity);
+      return delta || a.nick.localeCompare(b.nick, "ru");
+    });
 
   state.globalRankByNick = new Map(
     state.globalRows.map((p, idx) => [p.nick, idx + 1])
@@ -409,7 +373,6 @@ function selectPlayer(p) {
 
   const lastRating = p.series.at(-1)?.rating ?? null;
   if (els.currentRating) els.currentRating.textContent = fmt(lastRating, CONFIG.RATING_DIGITS);
-  if (els.pointsCount) els.pointsCount.textContent = String(p.series.length);
 
   setPlayerPhoto(p.nick);
   setPlayerGroup(lastRating);
@@ -648,10 +611,11 @@ function renderHistory(series) {
   let i = 0;
   while (i < series.length) {
     if (i + 1 < series.length && series[i].date === series[i + 1].date) {
-      merged.push({ date: series[i].date, startRating: series[i].rating, endRating: series[i + 1].rating });
+      const isReset = series[i].reset || series[i + 1].reset;
+      merged.push({ date: series[i].date, startRating: series[i].rating, endRating: series[i + 1].rating, reset: isReset, resetFrom: series[i].resetFrom ?? series[i + 1].resetFrom });
       i += 2;
     } else {
-      merged.push({ date: series[i].date, rating: series[i].rating });
+      merged.push({ date: series[i].date, rating: series[i].rating, reset: series[i].reset, resetFrom: series[i].resetFrom });
       i++;
     }
   }
@@ -666,13 +630,37 @@ function renderHistory(series) {
     const rank = getRankOnDate(p.date, endRating);
     const rankHtml = `<span class="hist-rank">#${rank}</span>`;
     const li = document.createElement("li");
+    const isReset = p.reset === true;
 
-    if (p.startRating != null) {
+    if (isReset) {
+      // Monthly reset — show reset value → end of day rating
+      const resetFrom = p.resetFrom ?? p.startRating;
+      const resetCol = `<span class="hist-reset-col">🔄 reset</span>`;
+      const emptyCol = `<span class="hist-reset-col"></span>`;
+      if (resetFrom != null && Math.abs(endRating - resetFrom) > 0.01) {
+        const delta = endRating - resetFrom;
+        const cls = deltaClass(delta);
+        li.innerHTML = `
+          <span>${escapeHtml(p.date)}</span>
+          ${rankHtml}
+          ${resetCol}
+          <span>${fmt(resetFrom, CONFIG.RATING_DIGITS)}<span class="hist-arrow">→</span>${fmt(endRating, CONFIG.RATING_DIGITS)} <span class="${cls}">(${formatDelta(delta, CONFIG.DELTA_DIGITS)})</span></span>
+        `;
+      } else {
+        li.innerHTML = `
+          <span>${escapeHtml(p.date)}</span>
+          ${rankHtml}
+          ${resetCol}
+          <span>${fmt(endRating, CONFIG.RATING_DIGITS)}</span>
+        `;
+      }
+    } else if (p.startRating != null) {
       const delta = p.endRating - p.startRating;
       const cls = deltaClass(delta);
       li.innerHTML = `
         <span>${escapeHtml(p.date)}</span>
         ${rankHtml}
+        <span class="hist-reset-col"></span>
         <span>${fmt(p.startRating, CONFIG.RATING_DIGITS)}<span class="hist-arrow">→</span>${fmt(p.endRating, CONFIG.RATING_DIGITS)} <span class="${cls}">(${formatDelta(delta, CONFIG.DELTA_DIGITS)})</span></span>
       `;
     } else if (prevRating != null) {
@@ -681,12 +669,14 @@ function renderHistory(series) {
       li.innerHTML = `
         <span>${escapeHtml(p.date)}</span>
         ${rankHtml}
+        <span class="hist-reset-col"></span>
         <span>${fmt(prevRating, CONFIG.RATING_DIGITS)}<span class="hist-arrow">→</span>${fmt(p.rating, CONFIG.RATING_DIGITS)} <span class="${cls}">(${formatDelta(delta, CONFIG.DELTA_DIGITS)})</span></span>
       `;
     } else {
       li.innerHTML = `
         <span>${escapeHtml(p.date)}</span>
         ${rankHtml}
+        <span class="hist-reset-col"></span>
         <span>${fmt(p.rating, CONFIG.RATING_DIGITS)}</span>
       `;
     }
@@ -1054,16 +1044,15 @@ function calcDelta(series, days) {
   return last.rating - base.rating;
 }
 
-function fmt(num, digits = 1) {
+function fmt(num) {
   if (num == null || Number.isNaN(num)) return "—";
-  return Number(num).toFixed(digits);
+  return String(Number(num));
 }
 
-function formatDelta(v, digits = 1) {
+function formatDelta(v) {
   if (v == null || Number.isNaN(v)) return "—";
-  const n = Number(v);
-  const s = n.toFixed(digits);
-  return n > 0 ? `+${s}` : s;
+  const n = parseFloat(Number(v).toFixed(1));
+  return n > 0 ? `+${n}` : String(n);
 }
 
 function deltaClass(v) {

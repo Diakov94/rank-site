@@ -189,21 +189,50 @@ async function loadAdminData() {
   renderAchievementsTab();
 
   try {
-    var data = await loadJSONP(ADMIN_CFG.DATA_URL);
-    st.players = (data && data.players ? data.players : [])
-      .map(function(p) {
-        var series = (p.series || []).slice().sort(function(a,b){return a.date.localeCompare(b.date);});
-        return {
-          nick: String(p.nick),
-          rating: series.length ? series[series.length - 1].rating : null,
-          series: series,
-        };
-      })
-      .sort(function(a, b) {
-        var ra = a.rating != null ? a.rating : -Infinity;
-        var rb = b.rating != null ? b.rating : -Infinity;
-        return rb - ra;
+    /* Load players from player_config + current ratings from engine */
+    var [configRes, ratingsResult] = await Promise.allSettled([
+      fetch(
+        SUPABASE.URL + "/rest/v1/player_config?select=nickname,initial_rating&order=nickname.asc",
+        { headers: { apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY } }
+      ).then(function(r) {
+        if (!r.ok) throw new Error("Player config request failed: HTTP " + r.status);
+        return r.json();
+      }),
+      typeof buildRatings === "function"
+        ? buildRatings()
+        : Promise.reject(new Error("Rating engine is unavailable")),
+    ]);
+
+    var configPlayers = (configRes.status === "fulfilled" && Array.isArray(configRes.value))
+      ? configRes.value : [];
+    var ratingsData = (ratingsResult.status === "fulfilled") ? ratingsResult.value : null;
+    if (configRes.status === "rejected") console.error("Player config load failed:", configRes.reason);
+    if (ratingsResult.status === "rejected") console.error("Rating calculation failed:", ratingsResult.reason);
+
+    /* Build rating lookup from engine */
+    var ratingByNick = {};
+    var seriesByNick = {};
+    if (ratingsData) {
+      ratingsData.leaderboard.forEach(function(p) {
+        ratingByNick[p.nickname] = p.rating;
       });
+      Object.keys(ratingsData.history).forEach(function(nick) {
+        seriesByNick[nick] = ratingsData.history[nick];
+      });
+    }
+
+    st.players = configPlayers.map(function(p) {
+      return {
+        nick: p.nickname,
+        rating: ratingByNick[p.nickname] ?? null,
+        series: seriesByNick[p.nickname] ?? [],
+      };
+    }).sort(function(a, b) {
+      var ra = a.rating != null ? a.rating : -Infinity;
+      var rb = b.rating != null ? b.rating : -Infinity;
+      return rb - ra;
+    });
+
     renderList();
   } catch (err) {
     playerList.innerHTML = '<p style="color:#ff7676;padding:24px 0;text-align:center;">Failed to load data: ' + escHtml(err.message) + '</p>';
@@ -215,7 +244,7 @@ async function loadAdminData() {
 /* ===== Tab switching ===== */
 function switchTab(tab) {
   st.currentTab = tab;
-  var tabIds = ["players", "achievements", "dashboard", "log", "groups", "telegram"];
+  var tabIds = ["players", "achievements", "dashboard", "log", "groups", "reset", "adjustments", "formula"];
   tabIds.forEach(function(key) {
     var btn = document.getElementById("tab" + key.charAt(0).toUpperCase() + key.slice(1));
     var sec = document.getElementById("section" + key.charAt(0).toUpperCase() + key.slice(1));
@@ -225,7 +254,366 @@ function switchTab(tab) {
   if (tab === "dashboard") renderDashboard();
   if (tab === "log") loadLog();
   if (tab === "groups") loadGroups().then(renderGroupsTab);
+  if (tab === "reset") loadResetTab();
+  if (tab === "adjustments") loadAdjustmentsTab();
+  if (tab === "formula") loadFormulaSettings();
 }
+
+/* ===== Rating formula settings ===== */
+var FORMULA_FIELDS = {
+  WinMin: "formulaWinMin", WinMax: "formulaWinMax",
+  DrawMin: "formulaDrawMin", DrawMax: "formulaDrawMax",
+};
+async function loadFormulaSettings() {
+  try {
+    var res = await fetch(SUPABASE.URL + "/rest/v1/settings?select=key,value", {
+      headers: { apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY },
+    });
+    if (!res.ok) throw new Error(await res.text());
+    var rows = await res.json();
+    var values = {};
+    rows.forEach(function(r) { values[r.key] = r.value; });
+    var defaults = { WinMin: 3, WinMax: 3, DrawMin: 1, DrawMax: 1 };
+    Object.keys(FORMULA_FIELDS).forEach(function(key) {
+      var input = document.getElementById(FORMULA_FIELDS[key]);
+      if (input) input.value = values[key] ?? defaults[key];
+    });
+  } catch (err) {
+    showFormulaMessage("Could not load settings: " + err.message, true);
+  }
+}
+async function saveFormulaSettings() {
+  var btn = document.getElementById("saveFormulaBtn");
+  var records = [];
+  for (var key of Object.keys(FORMULA_FIELDS)) {
+    var input = document.getElementById(FORMULA_FIELDS[key]);
+    var value = input ? input.value.trim() : "";
+    if (!value || !isFinite(Number(value))) { showFormulaMessage("Enter valid values for all numeric fields.", true); return; }
+    records.push({ key: key, value: value });
+  }
+  btn.disabled = true;
+  try {
+    var res = await fetch(SUPABASE.URL + "/rest/v1/settings?on_conflict=key", {
+      method: "POST",
+      headers: { apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY, "Content-Type": "application/json", Prefer: "resolution=merge-duplicates,return=minimal" },
+      body: JSON.stringify(records),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    writeLog("Rating formula updated", records.map(function(r) { return r.key + "=" + r.value; }).join(", "));
+    showFormulaMessage("✓ Saved. Reload the site to apply.", false);
+  } catch (err) {
+    showFormulaMessage("Save failed: " + err.message, true);
+  } finally { btn.disabled = false; }
+}
+function showFormulaMessage(message, error) {
+  var el = document.getElementById("formulaMsg");
+  if (!el) return;
+  el.textContent = message;
+  el.style.color = error ? "#ff7676" : "var(--accent)";
+  el.style.display = "inline";
+}
+
+/* ===== Monthly Reset ===== */
+
+function loadResetTab() {
+  var now = new Date();
+  var currentYear = now.getFullYear();
+
+  // Populate year dropdown (current year ± 2)
+  var yearSel = document.getElementById("resetYear");
+  if (yearSel && !yearSel.options.length) {
+    for (var y = currentYear - 1; y <= currentYear + 2; y++) {
+      var opt = document.createElement("option");
+      opt.value = y;
+      opt.textContent = y;
+      if (y === currentYear) opt.selected = true;
+      yearSel.appendChild(opt);
+    }
+  }
+
+  // Default to the current month and year.
+  var monthSel = document.getElementById("resetMonth");
+  if (monthSel) {
+    monthSel.value = String(now.getMonth() + 1).padStart(2, "0");
+  }
+  if (yearSel) yearSel.value = String(currentYear);
+
+  // Load players for the selected month when selectors change
+  if (yearSel) yearSel.onchange = loadResetPlayers;
+  if (monthSel) monthSel.onchange = loadResetPlayers;
+
+  loadResetPlayers();
+}
+
+function getResetDate() {
+  var year  = (document.getElementById("resetYear")  || {}).value;
+  var month = (document.getElementById("resetMonth") || {}).value;
+  if (!year || !month) return null;
+  return year + "-" + month + "-01";
+}
+
+async function loadResetPlayers() {
+  var container = document.getElementById("resetList");
+  if (!container) return;
+
+  var dateVal = getResetDate();
+  if (!dateVal) {
+    container.innerHTML = '<p class="loading-msg">Select a year and month above.</p>';
+    return;
+  }
+
+  // Update label
+  var label = document.getElementById("resetDateLabel");
+  var monthNames = ["January","February","March","April","May","June",
+                    "July","August","September","October","November","December"];
+  var parts = dateVal.split("-");
+  if (label) label.textContent = "Applied on: " + dateVal + "  (" + monthNames[parseInt(parts[1])-1] + " " + parts[0] + ")";
+
+  container.innerHTML = '<p class="loading-msg">Loading…</p>';
+
+  try {
+    // Fetch players and any existing resets for this date in parallel
+    var [playersRes, existingRes] = await Promise.all([
+      fetch(SUPABASE.URL + "/rest/v1/player_config?select=nickname,initial_rating&order=nickname.asc",
+        { headers: { apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY } }),
+      fetch(SUPABASE.URL + "/rest/v1/rating_adjustments?applied_date=eq." + dateVal + "&reason=eq.monthly_reset&select=nickname,new_rating",
+        { headers: { apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY } }),
+    ]);
+
+    var players  = await playersRes.json();
+    var existing = await existingRes.json();
+
+    if (!Array.isArray(players) || !players.length) {
+      container.innerHTML = '<p class="loading-msg">No players found.</p>';
+      return;
+    }
+
+    // Build existing ratings map: nickname → new_rating
+    var existingMap = {};
+    if (Array.isArray(existing)) {
+      existing.forEach(function(e) { existingMap[e.nickname] = e.new_rating; });
+    }
+
+    container.innerHTML = "";
+    container.className = "player-list";
+
+    // Group header info
+    var hasExisting = Object.keys(existingMap).length > 0;
+    if (hasExisting) {
+      var info = document.createElement("p");
+      info.style.cssText = "font-size:12px;opacity:0.55;margin:0 0 12px;";
+      info.textContent = "✓ Loaded existing reset (" + Object.keys(existingMap).length + " players saved). Edit and save to update.";
+      container.appendChild(info);
+    }
+
+    var frag = document.createDocumentFragment();
+    players.forEach(function(p) {
+      var savedRating = existingMap[p.nickname];
+      var displayRating = savedRating != null ? savedRating : p.initial_rating;
+
+      var supUrl = SUPABASE.URL + "/storage/v1/object/public/" + SUPABASE.BUCKET + "/" + encodeURIComponent(p.nickname) + ".png";
+      var uiUrl  = "https://ui-avatars.com/api/?name=" + encodeURIComponent(p.nickname) + "&background=0b1f17&color=35c07a&size=64&bold=true&format=png";
+
+      var row = document.createElement("div");
+      row.className = "player-row";
+      row.dataset.nick = p.nickname;
+      row.innerHTML =
+        '<div class="player-row-info">' +
+          '<img class="player-row-avatar" src="' + escAttr(supUrl) + '" alt="' + escAttr(p.nickname) + '" />' +
+          '<div>' +
+            '<div class="player-row-nick">' + escHtml(p.nickname) + '</div>' +
+            '<div class="player-row-rating" style="font-size:11px;opacity:0.5;">base: ' + p.initial_rating + '</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="row-actions" style="gap:8px;">' +
+          (savedRating != null ? '<span style="font-size:11px;color:var(--accent);opacity:0.8;">saved</span>' : '') +
+          '<label style="font-size:12px;opacity:0.5;white-space:nowrap;">Start rating</label>' +
+          '<input type="number" class="reset-rating-input group-min-input" value="' + displayRating + '" min="0" step="0.5" style="width:90px;text-align:right;" />' +
+        '</div>';
+
+      var img = row.querySelector(".player-row-avatar");
+      img.onerror = function() { img.onerror = null; img.src = uiUrl; };
+      frag.appendChild(row);
+    });
+    container.appendChild(frag);
+  } catch (e) {
+    container.innerHTML = '<p style="color:#ff7676;">Error: ' + escHtml(e.message) + '</p>';
+  }
+}
+
+document.addEventListener("DOMContentLoaded", function() {
+  var applyBtn = document.getElementById("applyResetBtn");
+  if (applyBtn) applyBtn.addEventListener("click", saveMonthlyReset);
+});
+
+async function saveMonthlyReset() {
+  var dateVal = getResetDate();
+  if (!dateVal) { alert("Please select year and month."); return; }
+
+  var rows = document.querySelectorAll("#resetList [data-nick]");
+  if (!rows.length) { alert("No players loaded."); return; }
+
+  var btn = document.getElementById("applyResetBtn");
+  btn.disabled = true; btn.textContent = "Saving…";
+
+  var records = [];
+  rows.forEach(function(row) {
+    var nick = row.dataset.nick;
+    var rating = parseFloat(row.querySelector(".reset-rating-input").value);
+    if (nick && isFinite(rating)) {
+      records.push({ nickname: nick, new_rating: rating, applied_date: dateVal, reason: "monthly_reset" });
+    }
+  });
+
+  try {
+    // Delete existing monthly_reset entries for this date first
+    await fetch(
+      SUPABASE.URL + "/rest/v1/rating_adjustments?applied_date=eq." + dateVal + "&reason=eq.monthly_reset",
+      { method: "DELETE", headers: { apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY } }
+    );
+
+    // Insert new ones
+    var res = await fetch(SUPABASE.URL + "/rest/v1/rating_adjustments", {
+      method: "POST",
+      headers: {
+        apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY,
+        "Content-Type": "application/json", Prefer: "resolution=ignore-duplicates",
+      },
+      body: JSON.stringify(records),
+    });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+
+    writeLog("Monthly reset saved", dateVal + " — " + records.length + " players");
+    var msg = document.getElementById("resetMsg");
+    if (msg) { msg.style.display = "inline"; setTimeout(function() { msg.style.display = "none"; }, 2500); }
+
+    // Reload to show "saved" badges
+    await loadResetPlayers();
+  } catch (e) {
+    alert("Error: " + e.message);
+  } finally {
+    btn.disabled = false; btn.textContent = "💾 Save Reset";
+  }
+}
+
+/* ===== Rating Adjustments ===== */
+async function loadAdjustmentsTab() {
+  var container = document.getElementById("adjList");
+  if (!container) return;
+  container.innerHTML = '<p class="loading-msg">Loading…</p>';
+
+  // Populate player select
+  var select = document.getElementById("adjNick");
+  if (select && !select.options.length) {
+    try {
+      var pRes = await fetch(
+        SUPABASE.URL + "/rest/v1/player_config?select=nickname&order=nickname.asc",
+        { headers: { apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY } }
+      );
+      var players = await pRes.json();
+      if (Array.isArray(players)) {
+        players.forEach(function(p) {
+          var opt = document.createElement("option");
+          opt.value = p.nickname;
+          opt.textContent = p.nickname;
+          select.appendChild(opt);
+        });
+      }
+    } catch (e) { console.warn("Players load failed:", e); }
+  }
+
+  // Default date = today
+  var adjDate = document.getElementById("adjDate");
+  if (adjDate && !adjDate.value) adjDate.value = new Date().toISOString().slice(0, 10);
+
+  // Load existing adjustments
+  try {
+    var res = await fetch(
+      SUPABASE.URL + "/rest/v1/rating_adjustments?select=*&order=applied_date.desc,id.desc&limit=100",
+      { headers: { apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY } }
+    );
+    var rows = await res.json();
+    renderAdjustmentsList(rows);
+  } catch (e) {
+    container.innerHTML = '<p style="color:#ff7676;">Error: ' + escHtml(e.message) + '</p>';
+  }
+}
+
+function renderAdjustmentsList(rows) {
+  var container = document.getElementById("adjList");
+  if (!container) return;
+  if (!rows.length) { container.innerHTML = '<p class="loading-msg">No adjustments yet.</p>'; return; }
+  container.innerHTML =
+    '<table style="width:100%;border-collapse:collapse;font-size:13px;">' +
+    '<thead><tr style="opacity:0.5;text-align:left;">' +
+    '<th style="padding:6px 8px;">Date</th><th style="padding:6px 8px;">Player</th>' +
+    '<th style="padding:6px 8px;">New Rating</th><th style="padding:6px 8px;">Reason</th>' +
+    '<th style="padding:6px 8px;"></th></tr></thead>' +
+    '<tbody>' +
+    rows.map(function(r) {
+      return '<tr style="border-top:1px solid rgba(255,255,255,0.06);">' +
+        '<td style="padding:6px 8px;">' + escHtml(r.applied_date) + '</td>' +
+        '<td style="padding:6px 8px;font-weight:600;">' + escHtml(r.nickname) + '</td>' +
+        '<td style="padding:6px 8px;color:var(--accent);">' + r.new_rating + '</td>' +
+        '<td style="padding:6px 8px;opacity:0.6;">' + escHtml(r.reason || "—") + '</td>' +
+        '<td style="padding:6px 8px;">' +
+          '<button class="btn adj-del-btn" data-id="' + r.id + '" type="button" ' +
+          'style="font-size:11px;color:#ff7676;padding:3px 8px;">✕</button>' +
+        '</td></tr>';
+    }).join("") +
+    '</tbody></table>';
+
+  container.querySelectorAll(".adj-del-btn").forEach(function(btn) {
+    btn.addEventListener("click", function() {
+      if (confirm("Delete this adjustment?")) deleteAdjustment(parseInt(btn.dataset.id));
+    });
+  });
+}
+
+async function deleteAdjustment(id) {
+  try {
+    var res = await fetch(
+      SUPABASE.URL + "/rest/v1/rating_adjustments?id=eq." + id,
+      { method: "DELETE", headers: { apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY } }
+    );
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    writeLog("Adjustment deleted", String(id));
+    loadAdjustmentsTab();
+  } catch (e) { alert("Error: " + e.message); }
+}
+
+document.addEventListener("DOMContentLoaded", function() {
+  var addBtn = document.getElementById("addAdjBtn");
+  if (addBtn) addBtn.addEventListener("click", async function() {
+    var nick   = (document.getElementById("adjNick") || {}).value;
+    var rating = parseFloat((document.getElementById("adjRating") || {}).value);
+    var date   = (document.getElementById("adjDate") || {}).value;
+    var reason = ((document.getElementById("adjReason") || {}).value || "").trim();
+
+    if (!nick || !isFinite(rating) || !date) { alert("Fill in player, rating and date."); return; }
+    addBtn.disabled = true; addBtn.textContent = "Saving…";
+
+    try {
+      var res = await fetch(SUPABASE.URL + "/rest/v1/rating_adjustments", {
+        method: "POST",
+        headers: {
+          apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({ nickname: nick, new_rating: rating, applied_date: date, reason: reason || null }),
+      });
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      writeLog("Adjustment added", nick + " → " + rating + " on " + date);
+      document.getElementById("adjRating").value = "";
+      document.getElementById("adjReason").value = "";
+      loadAdjustmentsTab();
+    } catch (e) {
+      alert("Error: " + e.message);
+    } finally {
+      addBtn.disabled = false; addBtn.textContent = "+ Add";
+    }
+  });
+});
 
 /* ===== Load groups ===== */
 async function loadGroups() {
@@ -237,7 +625,7 @@ async function loadGroups() {
     var rows = await res.json();
     if (Array.isArray(rows) && rows.length) {
       GROUPS = rows.map(function(r) {
-        return { id: r.id, name: r.name, min: r.min_rating, color: r.color };
+        return { id: r.id, name: r.name, min: r.min_rating, color: r.color, coef: Number(r.coef) };
       });
     }
   } catch (e) {
@@ -268,6 +656,8 @@ function renderGroupsTab() {
       '<input class="group-name-input" type="text" value="' + escAttr(g.name) + '" placeholder="Group name" />' +
       '<span class="group-min-label">Min rating:</span>' +
       '<input class="group-min-input" type="number" value="' + g.min + '" min="0" step="1" />' +
+      '<span class="group-min-label">Coef:</span>' +
+      '<input class="group-min-input group-coef-input" type="number" value="' + (g.coef ?? 1) + '" step="0.01" />' +
       '<button class="btn group-save-btn" type="button" style="font-size:13px;background:var(--accent);color:#0b0f14;font-weight:700;flex-shrink:0;">Save</button>';
 
     // Live-update swatch as colour changes
@@ -279,9 +669,11 @@ function renderGroupsTab() {
       var name     = row.querySelector(".group-name-input").value.trim();
       var color    = row.querySelector(".group-color-input").value;
       var min      = parseInt(row.querySelector(".group-min-input").value, 10);
+      var coef     = parseFloat(row.querySelector(".group-coef-input").value);
       if (!name) { alert("Name cannot be empty."); return; }
       if (isNaN(min) || min < 0) { alert("Min rating must be a non-negative number."); return; }
-      saveGroup(g.id, name, min, color, g, row);
+      if (!isFinite(coef) || coef <= 0) { alert("Coefficient must be greater than zero."); return; }
+      saveGroup(g.id, name, min, color, coef, g, row);
     });
 
     frag.appendChild(row);
@@ -290,7 +682,7 @@ function renderGroupsTab() {
 }
 
 /* ===== Save group ===== */
-async function saveGroup(id, name, minRating, color, groupObj, rowEl) {
+async function saveGroup(id, name, minRating, color, coef, groupObj, rowEl) {
   var saveBtn = rowEl.querySelector(".group-save-btn");
   saveBtn.disabled = true; saveBtn.textContent = "Saving…";
   try {
@@ -302,13 +694,14 @@ async function saveGroup(id, name, minRating, color, groupObj, rowEl) {
           apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY,
           "Content-Type": "application/json", Prefer: "return=representation",
         },
-        body: JSON.stringify({ name: name, min_rating: minRating, color: color }),
+        body: JSON.stringify({ name: name, min_rating: minRating, color: color, coef: coef }),
       }
     );
     if (!res.ok) { var errBody = await res.text(); throw new Error("HTTP " + res.status + ": " + errBody); }
     groupObj.name  = name;
     groupObj.min   = minRating;
     groupObj.color = color;
+    groupObj.coef = coef;
     GROUPS.sort(function(a, b) { return b.min - a.min; });
     writeLog("Group updated", name + " — min:" + minRating + " color:" + color);
     saveBtn.textContent = "✓ Saved";
@@ -739,6 +1132,7 @@ function makeRow(p) {
         '<span class="toggle-track"><span class="toggle-thumb"></span></span>' +
         '<span class="toggle-label">' + labelText + '</span>' +
       '</label>' +
+      '<button class="btn delete-player-btn" type="button" title="Delete player" style="font-size:11px;color:#ff7676;padding:3px 8px;">✕</button>' +
     '</div>';
 
   var img = row.querySelector(".player-row-avatar");
@@ -755,6 +1149,11 @@ function makeRow(p) {
   row.querySelector(".trophy-btn").addEventListener("click", function(e) {
     e.stopPropagation();
     openAchievementPicker(p.nick, this);
+  });
+  row.querySelector(".delete-player-btn").addEventListener("click", function() {
+    if (confirm('Delete player "' + p.nick + '"? This cannot be undone.')) {
+      deletePlayer(p.nick, row);
+    }
   });
   return row;
 }
@@ -1059,19 +1458,6 @@ function renderDashboard() {
       .sort(function(a, b) { return b.playedDays - a.playedDays || a.nick.localeCompare(b.nick); });
   }
 
-  function monthGridHtml(players) {
-    return players.map(function(p) {
-      var active = p.playedDays > 0;
-      var cls = active ? 'player-tile tile-active' : 'player-tile tile-inactive';
-      var stats = active
-        ? '<div class="tile-stat tile-played">' + p.playedDays + ' day' + (p.playedDays !== 1 ? 's' : '') + '</div>' +
-          (p.zeroDays > 0 ? '<div class="tile-stat tile-zero">○ ' + p.zeroDays + ' no Δ</div>' : '')
-        : '<div class="tile-stat tile-none">✗ no games</div>' +
-          (p.zeroDays > 0 ? '<div class="tile-stat tile-zero">○ ' + p.zeroDays + ' no Δ</div>' : '');
-      return '<div class="' + cls + '"><div class="tile-nick">' + escHtml(p.nick) + '</div>' + stats + '</div>';
-    }).join('');
-  }
-
   /* summary for current month */
   var curPlayers    = calcMonthActivity(monthPrefix);
   var activeCnt     = curPlayers.filter(function(p) { return p.playedDays > 0; }).length;
@@ -1231,155 +1617,6 @@ if (adminSearch) adminSearch.addEventListener("input", debounce(function() {
   st.searchQuery = adminSearch.value; renderList();
 }, 120));
 
-/* ===== Telegram settings ===== */
-function loadTelegramSettings() {
-  var tokenInput   = document.getElementById("tgBotToken");
-  var chatInput    = document.getElementById("tgChatId");
-  var defaultInput = document.getElementById("tgDefaultCaption");
-  if (tokenInput)   tokenInput.value   = localStorage.getItem("tg_bot_token")       || "";
-  if (chatInput)    chatInput.value    = localStorage.getItem("tg_chat_id")         || "";
-  if (defaultInput) defaultInput.value = localStorage.getItem("tg_default_caption") || "";
-}
-function saveTelegramSettings() {
-  var token   = (document.getElementById("tgBotToken")?.value        || "").trim();
-  var chatId  = (document.getElementById("tgChatId")?.value          || "").trim();
-  var defCap  = (document.getElementById("tgDefaultCaption")?.value  || "").trim();
-  if (!token || !chatId) { alert("Fill in both Bot Token and Chat ID."); return; }
-  localStorage.setItem("tg_bot_token",       token);
-  localStorage.setItem("tg_chat_id",         chatId);
-  localStorage.setItem("tg_default_caption", defCap);
-  var msg = document.getElementById("tgSaveMsg");
-  if (msg) { msg.style.display = "block"; setTimeout(function() { msg.style.display = "none"; }, 2500); }
-}
-
-function get1DayChange(series) {
-  if (!series || series.length < 2) return null;
-  var last = series[series.length - 1];
-  var lastDate = new Date(last.date + "T00:00:00");
-  var monthStart = new Date(lastDate.getFullYear(), lastDate.getMonth(), 1);
-  var monthEntries = series.filter(function(p) { return new Date(p.date + "T00:00:00") >= monthStart; });
-  if (monthEntries.length < 2) return null;
-  // target = 1 day before last, capped at month start
-  var target = new Date(lastDate);
-  target.setDate(target.getDate() - 1);
-  var effectiveFrom = target >= monthStart ? target : monthStart;
-  var base = monthEntries[0];
-  for (var i = 0; i < monthEntries.length - 1; i++) {
-    if (new Date(monthEntries[i].date + "T00:00:00") <= effectiveFrom) base = monthEntries[i];
-  }
-  if (base === last) return null;
-  return { from: base.rating, to: last.rating, delta: last.rating - base.rating };
-}
-
-function renderTgLeaderboard() {
-  var el = document.getElementById("tgCaptureArea");
-  if (!el) return;
-
-  var sorted = st.players
-    .filter(function(p) { return !st.hiddenNicks.has(p.nick) && p.series && p.series.length; })
-    .map(function(p) {
-      var last = p.series[p.series.length - 1];
-      var change = get1DayChange(p.series);
-      return { nick: p.nick, rating: last.rating, change: change };
-    })
-    .sort(function(a, b) { return b.rating - a.rating; });
-
-  var rowsHtml = sorted.map(function(p, i) {
-    var rank = i + 1;
-    var bg = rank === 1 ? "rgba(255,215,0,0.08)" : rank === 2 ? "rgba(180,200,230,0.08)" : rank === 3 ? "rgba(205,127,50,0.08)" : "transparent";
-    var fw = rank <= 3 ? "700" : "400";
-
-    var changeHtml = "";
-    if (p.change) {
-      var d = p.change.delta;
-      var sign = d > 0 ? "+" : "";
-      var col  = d > 0 ? "#52d18a" : d < 0 ? "#ff7676" : "rgba(255,255,255,0.45)";
-      var dStr = sign + d.toFixed(1);
-      changeHtml = '<span style="font-size:12px;color:rgba(255,255,255,0.40);font-variant-numeric:tabular-nums;margin-right:6px;">'
-        + p.change.from.toFixed(1) + ' → ' + p.change.to.toFixed(1)
-        + '</span>'
-        + '<span style="font-size:13px;font-weight:700;font-variant-numeric:tabular-nums;color:' + col + ';min-width:52px;text-align:right;">' + dStr + '</span>';
-    } else {
-      changeHtml = '<span style="font-size:14px;font-weight:700;font-variant-numeric:tabular-nums;color:#35c07a;">' + p.rating.toFixed(1) + '</span>';
-    }
-
-    return '<div style="display:flex;align-items:center;padding:8px 14px;background:' + bg + ';border-bottom:1px solid rgba(255,255,255,0.06);">'
-      + '<span style="width:28px;font-size:12px;color:rgba(255,255,255,0.40);font-weight:700;">' + rank + '</span>'
-      + '<span style="flex:1;font-size:14px;font-weight:' + fw + ';color:#e9edf5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">' + escHtml(p.nick) + '</span>'
-      + '<span style="display:flex;align-items:center;gap:0;">' + changeHtml + '</span>'
-      + '</div>';
-  }).join("");
-
-  var now = new Date().toLocaleDateString("uk-UA", { day: "2-digit", month: "long", year: "numeric" });
-  el.innerHTML = '<div style="font-family:ui-sans-serif,system-ui,-apple-system,sans-serif;background:#0b0f14;color:#e9edf5;width:460px;border-radius:16px;overflow:hidden;border:1px solid rgba(255,255,255,0.10);">'
-    + '<div style="padding:14px 18px 10px;border-bottom:1px solid rgba(255,255,255,0.08);display:flex;align-items:center;justify-content:space-between;">'
-    +   '<div style="font-size:16px;font-weight:700;letter-spacing:-0.01em;">ESportsBattle Leaderboard</div>'
-    +   '<div style="font-size:12px;color:rgba(255,255,255,0.40);">' + now + '</div>'
-    + '</div>'
-    + rowsHtml
-    + '<div style="padding:8px 14px;font-size:11px;color:rgba(255,255,255,0.20);text-align:right;">esportsbattle.rank</div>'
-    + '</div>';
-}
-
-function escHtml(str) {
-  return String(str).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
-}
-
-async function sendLeaderboardFromAdmin() {
-  var token  = localStorage.getItem("tg_bot_token");
-  var chatId = localStorage.getItem("tg_chat_id");
-  if (!token || !chatId) { alert("Save Bot Token and Chat ID first (⚙️ Bot Settings above)."); return; }
-  if (typeof html2canvas === "undefined") { alert("html2canvas not loaded yet, please wait."); return; }
-  if (!st.players.length) { alert("Player data not loaded yet. Please wait."); return; }
-
-  var btn    = document.getElementById("tgSendBtn");
-  var errEl  = document.getElementById("tgSendErr");
-  var okEl   = document.getElementById("tgSendMsg");
-  var origTxt = btn ? btn.textContent : "";
-  if (btn) { btn.disabled = true; btn.textContent = "Rendering…"; }
-  if (errEl) errEl.style.display = "none";
-  if (okEl)  okEl.style.display  = "none";
-
-  try {
-    renderTgLeaderboard();
-    var captureEl = document.getElementById("tgCaptureArea");
-    // briefly make visible off-screen for html2canvas
-    captureEl.style.left = "-9999px";
-    captureEl.style.visibility = "visible";
-    if (btn) btn.textContent = "Capturing…";
-
-    var canvas = await html2canvas(captureEl.firstChild, {
-      backgroundColor: "#0b0f14",
-      scale: 2,
-      useCORS: true,
-      logging: false,
-    });
-    captureEl.style.visibility = "hidden";
-
-    var blob = await new Promise(function(res) { canvas.toBlob(res, "image/png"); });
-    var caption = (document.getElementById("tgCaption")?.value || "").trim()
-                  || localStorage.getItem("tg_default_caption") || "";
-    var form = new FormData();
-    form.append("chat_id", chatId);
-    form.append("photo", blob, "leaderboard.png");
-    if (caption) form.append("caption", caption);
-
-    if (btn) btn.textContent = "Sending…";
-    var res  = await fetch("https://api.telegram.org/bot" + token + "/sendPhoto", { method: "POST", body: form });
-    var data = await res.json();
-
-    if (data.ok) {
-      if (okEl) { okEl.style.display = "block"; setTimeout(function() { okEl.style.display = "none"; }, 3000); }
-    } else {
-      if (errEl) { errEl.textContent = "Telegram error: " + (data.description || "unknown"); errEl.style.display = "block"; }
-    }
-  } catch(err) {
-    if (errEl) { errEl.textContent = "Error: " + err.message; errEl.style.display = "block"; }
-  } finally {
-    if (btn) { btn.disabled = false; btn.textContent = origTxt; }
-  }
-}
-
 document.addEventListener("DOMContentLoaded", function() {
   /* Tab buttons */
   var tabPlayers = document.getElementById("tabPlayers");
@@ -1392,27 +1629,18 @@ document.addEventListener("DOMContentLoaded", function() {
   if (tabLog)     tabLog.addEventListener("click",     function() { switchTab("log"); });
   var tabGroups = document.getElementById("tabGroups");
   if (tabGroups)  tabGroups.addEventListener("click",  function() { switchTab("groups"); });
-  var tabTelegram = document.getElementById("tabTelegram");
-  if (tabTelegram) tabTelegram.addEventListener("click", function() { switchTab("telegram"); loadTelegramSettings(); });
+  var tabReset = document.getElementById("tabReset");
+  if (tabReset) tabReset.addEventListener("click", function() { switchTab("reset"); });
+  var tabAdj = document.getElementById("tabAdjustments");
+  if (tabAdj) tabAdj.addEventListener("click", function() { switchTab("adjustments"); });
+  var tabFormula = document.getElementById("tabFormula");
+  if (tabFormula) tabFormula.addEventListener("click", function() { switchTab("formula"); });
+  var saveFormulaBtn = document.getElementById("saveFormulaBtn");
+  if (saveFormulaBtn) saveFormulaBtn.addEventListener("click", saveFormulaSettings);
 
-  /* Telegram eye-toggle buttons */
-  document.querySelectorAll(".tg-eye-btn").forEach(function(btn) {
-    btn.addEventListener("click", function() {
-      var input = document.getElementById(btn.dataset.target);
-      if (!input) return;
-      var isHidden = input.type === "password";
-      input.type = isHidden ? "text" : "password";
-      btn.classList.toggle("active", isHidden);
-      btn.textContent = isHidden ? "🙈" : "👁";
-    });
-  });
-
-  /* Telegram save button */
-  var tgSaveBtn = document.getElementById("tgSaveBtn");
-  if (tgSaveBtn) tgSaveBtn.addEventListener("click", saveTelegramSettings);
-  /* Telegram send button */
-  var tgSendBtn = document.getElementById("tgSendBtn");
-  if (tgSendBtn) tgSendBtn.addEventListener("click", sendLeaderboardFromAdmin);
+  /* Add new player */
+  var addPlayerBtn = document.getElementById("addPlayerBtn");
+  if (addPlayerBtn) addPlayerBtn.addEventListener("click", addNewPlayer);
 
   /* Export CSV button */
   var exportBtn = document.getElementById("exportCsvBtn");
@@ -1457,4 +1685,67 @@ if (getCookie(ADMIN_CFG.COOKIE)) {
   enterPanel();
 } else {
   if (emailInput) emailInput.focus();
+}
+
+/* ===== Delete Player ===== */
+async function deletePlayer(nick, rowEl) {
+  if (rowEl) rowEl.style.opacity = "0.4";
+  try {
+    var res = await fetch(
+      SUPABASE.URL + "/rest/v1/player_config?nickname=eq." + encodeURIComponent(nick),
+      { method: "DELETE", headers: { apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY } }
+    );
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    writeLog("Player deleted", nick);
+    st.players = st.players.filter(function(p) { return p.nick !== nick; });
+    if (rowEl) rowEl.remove();
+    updateStats();
+  } catch (e) {
+    if (rowEl) rowEl.style.opacity = "1";
+    alert("Error: " + e.message);
+  }
+}
+
+/* ===== Add New Player ===== */
+async function addNewPlayer() {
+  var nickInput   = document.getElementById("newPlayerNick");
+  var ratingInput = document.getElementById("newPlayerRating");
+  var msg         = document.getElementById("addPlayerMsg");
+  var btn         = document.getElementById("addPlayerBtn");
+
+  var nick   = (nickInput ? nickInput.value.trim() : "");
+  var rating = parseFloat(ratingInput ? ratingInput.value : "");
+
+  if (!nick) { showAddMsg("Enter a nickname.", "error"); return; }
+  if (!isFinite(rating) || rating < 0) { showAddMsg("Enter a valid starting rating.", "error"); return; }
+
+  btn.disabled = true; btn.textContent = "Adding…";
+
+  try {
+    var res = await fetch(SUPABASE.URL + "/rest/v1/player_config", {
+      method: "POST",
+      headers: {
+        apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY,
+        "Content-Type": "application/json", Prefer: "resolution=ignore-duplicates",
+      },
+      body: JSON.stringify({ nickname: nick, initial_rating: rating, active: true }),
+    });
+    if (!res.ok) { var e = await res.text(); throw new Error(e); }
+
+    writeLog("Player added", nick + " (rating: " + rating + ")");
+    showAddMsg("✓ " + nick + " added!", "success");
+    if (nickInput) nickInput.value = "";
+  } catch (e) {
+    showAddMsg("Error: " + e.message, "error");
+  } finally {
+    btn.disabled = false; btn.textContent = "+ Add Player";
+  }
+
+  function showAddMsg(text, type) {
+    if (!msg) return;
+    msg.textContent = text;
+    msg.style.color = type === "error" ? "#ff7676" : "var(--accent)";
+    msg.style.display = "inline";
+    setTimeout(function() { msg.style.display = "none"; }, 3000);
+  }
 }

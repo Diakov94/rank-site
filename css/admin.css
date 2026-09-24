@@ -9,7 +9,6 @@ html, body { overflow-x: hidden; }
 .login-screen { min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px; }
 .login-card { width:100%; max-width:360px; background:var(--card-bg); border:1px solid var(--card-border); border-radius:var(--radius-lg); padding:32px; box-shadow:var(--shadow-card); animation:fadeIn 320ms var(--ease) both; }
 .login-card h2 { margin:0 0 4px; font-size:22px; }
-.login-sub { opacity:0.6; font-size:13px; margin:0 0 24px; }
 .field { margin-bottom:16px; }
 .field label { display:block; font-size:12px; opacity:0.7; margin-bottom:6px; text-transform:uppercase; letter-spacing:0.04em; }
 .field input[type=password],
@@ -122,7 +121,6 @@ html, body { overflow-x: hidden; }
 .tile-nick { font-size:12px; font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-bottom:7px; }
 .tile-stat { font-size:11px; line-height:1.7; }
 .tile-played { color:#52d18a; }
-.tile-zero   { color:rgba(255,255,255,0.35); }
 .tile-none   { color:#ff7676; }
 
 /* ===== Year accordion ===== */
@@ -200,21 +198,5 @@ html, body { overflow-x: hidden; }
 .ach-edit-input { padding:8px 12px; border-radius:var(--radius-sm); border:1px solid var(--soft-border); background:var(--soft-bg); color:inherit; font:inherit; outline:none; }
 .ach-edit-input:focus { border-color:var(--accent-border); box-shadow:0 0 0 3px rgba(53,192,122,0.15); }
 
-/* ===== Telegram settings ===== */
-.tg-block { background:var(--card-bg); border:1px solid var(--card-border); border-radius:var(--radius-md); padding:18px 20px; max-width:520px; }
-.tg-block-title { font-size:14px; font-weight:700; margin-bottom:2px; }
-.tg-settings { display:flex; flex-direction:column; gap:14px; }
+/* Shared field label */
 .tg-label { display:block; font-size:12px; opacity:0.7; margin-bottom:6px; text-transform:uppercase; letter-spacing:0.04em; }
-.tg-input { width:100%; padding:10px 12px; border-radius:var(--radius-sm); border:1px solid var(--soft-border); background:var(--soft-bg); color:inherit; font:inherit; font-size:14px; outline:none; transition:border-color var(--t) var(--ease),box-shadow var(--t) var(--ease); }
-.tg-input:focus { border-color:var(--accent-border); box-shadow:0 0 0 3px rgba(53,192,122,0.15); }
-.tg-textarea { resize:vertical; min-height:72px; line-height:1.5; }
-.tg-secret-wrap { position:relative; display:flex; align-items:center; }
-.tg-secret-wrap .tg-input { padding-right:40px; }
-.tg-eye-btn {
-  position:absolute; right:10px;
-  background:none; border:none; cursor:pointer;
-  font-size:16px; opacity:0.4; padding:0; line-height:1;
-  transition:opacity var(--t) var(--ease);
-}
-.tg-eye-btn:hover { opacity:0.9; }
-.tg-eye-btn.active { opacity:0.85; }
