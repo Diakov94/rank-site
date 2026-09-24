@@ -294,7 +294,7 @@ function renderWeekBanner() {
   els.weekAvatar.src = supUrl;
   els.weekAvatar.onerror = () => { els.weekAvatar.onerror = null; els.weekAvatar.src = uiUrl; };
   els.weekNick.textContent = best.nick;
-  els.weekDelta.textContent = `+${fmt(best.delta7, CONFIG.DELTA_DIGITS)} pts this week`;
+  els.weekDelta.textContent = `+${Number(best.delta7).toFixed(CONFIG.DELTA_DIGITS)} pts this week`;
   els.weekRating.textContent = `Rating: ${fmt(best.rating, CONFIG.RATING_DIGITS)}`;
 
   els.weekBanner.style.display = "";
