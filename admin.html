@@ -43,6 +43,7 @@
     <div class="container admin-header-row">
       <h1 class="admin-title">ESB Admin</h1>
       <div class="admin-header-actions">
+        <span id="adminIdentity" class="admin-identity" hidden></span>
         <a href="./index.html" class="btn" style="text-decoration:none;font-size:13px;">← Back to site</a>
         <button id="logoutBtn" class="btn" type="button" style="font-size:13px;">Log out</button>
       </div>
@@ -57,6 +58,8 @@
         <button id="tabReset" class="admin-tab" type="button">📅 Monthly Reset</button>
         <button id="tabAdjustments" class="admin-tab" type="button">⚙️ Adjustments</button>
         <button id="tabFormula" class="admin-tab" type="button">🧮 Formula</button>
+        <button id="tabUsers" class="admin-tab" type="button" hidden>👤 Users</button>
+        <button id="tabRoles" class="admin-tab" type="button" hidden>🔐 Roles</button>
       </div>
     </div>
   </header>
@@ -73,7 +76,7 @@
       <!-- Load failures that do not empty the list (ratings, visibility, badges) -->
       <div id="playerLoadError" class="load-error-box" style="display:none;"></div>
       <!-- Add new player -->
-      <div class="admin-form">
+      <div id="addPlayerForm" class="admin-form">
         <div class="field">
           <label class="tg-label">Nickname</label>
           <input id="newPlayerNick" class="admin-input admin-input--nick" type="text" placeholder="e.g. PlayerName" />
@@ -243,6 +246,60 @@
         <button id="saveFormulaBtn" class="btn" type="button" style="background:var(--accent);color:#0b0f14;font-weight:700;">Save formula</button>
         <span id="formulaMsg" style="font-size:13px;display:none;"></span>
       </div>
+    </div>
+
+    <!-- USERS TAB -->
+    <div id="sectionUsers" style="display:none;padding-bottom:32px;">
+      <div class="ach-section-header" style="margin-bottom:4px;">
+        <h2 class="ach-section-title">Users</h2>
+      </div>
+      <p class="dash-h3" style="margin-top:0;margin-bottom:16px;">
+        Accounts that can log in to the admin panel. Each user has one role. You can give only roles whose
+        permissions you hold yourself, and you cannot change your own account here.
+      </p>
+      <!-- Create user -->
+      <div id="createUserForm" class="admin-form admin-form--roomy">
+        <div class="admin-field">
+          <label class="tg-label" for="newUserEmail">Email</label>
+          <input id="newUserEmail" class="admin-input admin-input--email" type="email" autocomplete="off" placeholder="name@example.com" />
+        </div>
+        <div class="admin-field">
+          <label class="tg-label" for="newUserPassword">Password</label>
+          <input id="newUserPassword" class="admin-input admin-input--password" type="password" autocomplete="new-password" placeholder="At least 8 characters" />
+        </div>
+        <div class="admin-field">
+          <label class="tg-label" for="newUserRole">Role</label>
+          <select id="newUserRole" class="admin-input admin-input--role"></select>
+        </div>
+        <button id="createUserBtn" class="btn btn-accent" type="button">+ Create user</button>
+        <span id="createUserMsg" class="form-msg" hidden></span>
+      </div>
+      <div id="userList" class="user-list"><p class="loading-msg">Loading…</p></div>
+    </div>
+
+    <!-- ROLES TAB -->
+    <div id="sectionRoles" style="display:none;padding-bottom:32px;">
+      <div class="ach-section-header" style="margin-bottom:4px;">
+        <h2 class="ach-section-title">Roles</h2>
+      </div>
+      <p class="dash-h3" style="margin-top:0;margin-bottom:16px;">
+        A role is a set of permissions. Only the super admin sees this tab and creates, edits and deletes roles.
+        The super admin role has every permission and cannot be changed.
+      </p>
+      <!-- Create role -->
+      <div id="createRoleForm" class="admin-form admin-form--roomy">
+        <div class="admin-field">
+          <label class="tg-label" for="newRoleName">Name</label>
+          <input id="newRoleName" class="admin-input admin-input--role-name" type="text" autocomplete="off" placeholder="e.g. Moderator" />
+        </div>
+        <div class="admin-field admin-form-grow">
+          <label class="tg-label" for="newRoleDesc">Description (optional)</label>
+          <input id="newRoleDesc" class="admin-input admin-input--full" type="text" autocomplete="off" placeholder="What this role is for" />
+        </div>
+        <button id="createRoleBtn" class="btn btn-accent" type="button" style="white-space:nowrap;">+ Create role</button>
+        <span id="createRoleMsg" class="form-msg" hidden></span>
+      </div>
+      <div id="roleList" class="role-list"><p class="loading-msg">Loading…</p></div>
     </div>
 
   </main>

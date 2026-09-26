@@ -2,8 +2,9 @@
 
 A static site with a public leaderboard and rating history for ESportsBattle players
 (`index.html`), plus an admin panel for managing players, ratings and
-achievements (`admin.html`). It is plain HTML, CSS and JavaScript: no build step, no
-runtime dependencies and no server of its own. Match results come from Google Sheets,
+achievements (`admin.html`), with roles and permissions for its admins. It is plain HTML,
+CSS and JavaScript: no build step, no runtime dependencies and no server of its own
+(two Supabase Edge Functions aside). Match results come from Google Sheets,
 configuration comes from Supabase, and ratings are computed in the browser.
 
 The site is an **alpha** version: both pages show an "ALPHA PRODUCT" notice saying it is
@@ -135,8 +136,8 @@ of the latest month and never measures from an adjusted entry.
 
 A player's profile shows two ratings:
 
-- **Current rating**: the rating at the end of the previous work day. It stays the same
-  for the whole work day.
+- **Closing rating**: the rating at the close of the previous work day (07:30 Kyiv time),
+  like a closing price. It stays the same for the whole work day.
 - **Live rating**: the latest rating, including the current work day's matches and
   adjustments so far.
 
@@ -153,7 +154,9 @@ A player's profile shows two ratings:
 | `js/admin.js` | Admin panel UI. |
 | `icons/favicon.svg` | Favicon. |
 | `supabase/functions/esb-sync/index.ts` | Edge function that copies matches from the ESportsBattle API (see below). |
-| `supabase/migrations/` | SQL for Row Level Security and admin accounts. |
+| `supabase/functions/admin-users/` | Edge function behind the admin panel's Users tab: `handler.js` (the logic) and `index.ts` (Deno wiring). See below. |
+| `supabase/migrations/` | SQL for Row Level Security, roles and permissions. |
+| `supabase/tests/roles_test.sql` | SQL self-test of the roles rules; it rolls itself back. |
 | `tests/` | Unit tests (Node's built-in test runner). |
 
 The pages load their scripts as classic `defer` scripts, in this order:
@@ -174,8 +177,12 @@ top-level name must be declared in only one of the files loaded by a page.
 | `hidden_players` | `nick` | public page, admin | admin |
 | `achievements` | `id`, `name`, `icon_url`, `url` | public page, admin | admin |
 | `player_achievements` | `nick`, `achievement_id` | public page, admin | admin |
-| `admin_log` | `id`, `created_at`, `action`, `details`, `email` | admin | admin |
-| `admin_users` | `user_id`, `created_at` | `is_admin()` only | SQL editor / service role |
+| `admin_log` | `id`, `created_at` (both only defaults: the API cannot set them), `action`, `details`, `email` (a trigger sets it to the signed-in user's email) | admin (Log tab) | admin (every admin action) |
+| `permissions` | `key`, `label`, `description`, `sort` | admin | the roles migration (a fixed list) |
+| `roles` | `id`, `name`, `description`, `is_super`, `created_at` | admin, admin-users | admin (Roles tab) |
+| `role_permissions` | `role_id`, `permission_key` | admin, admin-users | admin (Roles tab) |
+| `user_roles` | `user_id` (primary key), `role_id`, `assigned_at`, `assigned_by` (both set by a trigger) | admin, admin-users, `my_access()` | admin (Users tab), admin-users |
+| `admin_users` | `user_id`, `created_at` | nothing since the roles migration, which copied it into `user_roles` | SQL editor |
 | `matches` | `external_id`, `date`, `time`, `tournament`, `team1`, `team2`, `player1`, `player2`, `score1`, `score2`, `source` | esb-sync only (duplicate check); nothing in the site | esb-sync |
 
 `suspended_from`/`suspended_to` have no UI; set them with SQL. `active` is written when a
@@ -186,35 +193,183 @@ player is added but is not read. Storage buckets (both public): `player-avatars`
 
 - The publishable key in `js/common.js` ships to every visitor by design. It only
   identifies the project; Row Level Security decides what a request may do.
-- `supabase/migrations/20260926000000_admin_only_writes.sql` makes every site table
-  readable by anyone and writable only by admins, makes `admin_log` admin-only, and
-  lets only admins upload, replace or delete objects in the two buckets. An admin is a
-  Supabase Auth user listed in `public.admin_users`; the policies call
-  `public.is_admin()`.
-- The admin panel signs in with Supabase Auth (email and password), keeps the session in
+- Two migrations set up the rules:
+  1. `supabase/migrations/20260926000000_admin_only_writes.sql` makes every site table
+     readable by anyone and writable only by admins, makes `admin_log` admin-only, and
+     lets only admins upload, replace or delete objects in the two buckets. An admin was
+     a Supabase Auth user listed in `public.admin_users`.
+  2. `supabase/migrations/20260927000000_roles.sql` replaces "any admin may write" with
+     roles and permissions. It keeps the public reads, replaces the first migration's
+     write policies (`esb_admin_*`) with per-permission ones (`esb_perm_*`) and copies
+     `admin_users` into `user_roles` as super admins. It also works on a project where
+     the first migration was never applied.
+- An **admin** is a Supabase Auth user with a row in `public.user_roles`, which gives them
+  exactly one role. A user without a role can sign in to Supabase but cannot read or
+  change anything the public cannot.
+- The database enforces every rule, with RLS policies and triggers. On the site tables,
+  `admin_log` and the two buckets every write must pass a permissive and a restrictive
+  policy, so an old "allow all" policy cannot open them again. The admin panel only hides
+  what the role cannot use.
+- The esb-sync function uses the service role key, which bypasses RLS. The admin-users
+  function uses it only for the Auth admin API and for reads; it writes `user_roles` as
+  the caller, so the policies apply to those writes.
+
+#### Permissions
+
+The list is fixed (seeded by the migration); roles combine them.
+
+| Key | Shown as | Allows |
+| --- | --- | --- |
+| `players.edit` | Add and delete players | writes to `player_config` |
+| `players.visibility` | Hide and show players | writes to `hidden_players` |
+| `avatars.upload` | Upload player photos | uploads to the `player-avatars` bucket |
+| `achievements.edit` | Create, edit and delete achievements | writes to `achievements`, uploads to the `achievements` bucket |
+| `badges.assign` | Assign achievements to players | writes to `player_achievements` |
+| `groups.edit` | Edit rating groups | writes to `rating_groups` |
+| `reset.run` | Save monthly resets | `rating_adjustments` rows with reason `monthly_reset` |
+| `adjustments.edit` | Add and delete rating adjustments | every other `rating_adjustments` row (another reason, or none) |
+| `formula.edit` | Edit the rating formula | the `settings` rows `WinMin`, `WinMax`, `DrawMin`, `DrawMax` |
+| `log.read` | Read the activity log | reading `admin_log` |
+| `log.clear` | Clear the activity log | deleting from `admin_log` (Postgres deletes only rows you can read, so this needs `log.read` too) |
+| `users.manage` | Create and delete users, assign roles | writes to `user_roles` and the admin-users function |
+
+Creating, editing and deleting roles, and choosing their permissions (`roles` and
+`role_permissions` writes), is for the super admin only. It is not a permission that can
+be given to anyone else.
+
+A write is checked on the old row and on the new one, so turning a monthly reset into an
+ordinary adjustment needs both `reset.run` and `adjustments.edit`. Without any
+permission, every admin can add `admin_log` entries (the email is always the signed-in
+user's, whatever the client sends, and `id` and `created_at` always keep their defaults),
+read the permission list and the roles, and read their own `user_roles` row. Nobody edits
+log entries. Other `settings` keys and `matches` need the super admin. Other storage
+buckets are left to their own policies.
+
+#### Roles and the super admin
+
+- A role is a name, a description and a set of permissions (`role_permissions`).
+- One role is seeded: **Super admin** (`is_super`). It has every permission without any
+  `role_permissions` rows. Over the API it cannot be renamed, edited or deleted and
+  nothing can be added to it. No other role can become super: `is_super` never changes
+  and a unique index allows only one super role. A trigger keeps `is_super` fixed and the
+  super role from being deleted in the SQL editor too.
+- A role that is still assigned to users cannot be deleted (foreign key; the admin panel
+  says "Role is still assigned to users").
+
+#### Anti-escalation rules
+
+- Only the super admin changes roles and their permissions, so nobody else can give a
+  role more rights, or strip a right from someone else's role to make that role (and its
+  users) theirs to manage.
+- You can assign a role only if you could grant it: a super admin can grant any role,
+  anyone else only a role that is not super and whose every permission they hold
+  (`private.can_grant_role`). Changing or removing someone's role also needs that for their
+  current role, so a users manager cannot demote or delete a super admin, or anyone whose
+  role has rights the manager lacks.
+- Nobody can change or remove their own role. The admin-users function does not let you
+  delete your own account or set your own password either.
+- The last super admin cannot be removed: an update or delete of `user_roles` that leaves
+  nobody with the super role fails with "Cannot remove the last super admin" (SQLSTATE
+  `PT409`, so PostgREST answers 409). That also blocks deleting that user under
+  Authentication > Users.
+- `user_roles.assigned_at` and `assigned_by` are set by a trigger to the time and the
+  signed-in caller, not to values the client sends.
+
+#### Database functions
+
+- `public.my_access()`: `POST /rest/v1/rpc/my_access` with the user's token returns
+  `{"role": {"id": 1, "name": "Super admin", "is_super": true}, "permissions": ["players.edit", ...]}`,
+  or `{"role": null, "permissions": []}` for a user without a role. Signed-in users only.
+- `public.is_admin()`: kept for older front ends; true when the caller has a role.
+- `private.is_staff()`, `private.is_super()`, `private.has_permission(key)` and
+  `private.can_grant_role(role_id)` are what the policies call. The `private` schema is not
+  exposed by the API, and the functions only describe the caller.
+
+#### How the admin panel adapts
+
+- It signs in with Supabase Auth (email and password), keeps the session in
   `localStorage` (`esb_admin_session`), refreshes it when it expires and sends the user's
-  access token with all of its own reads and writes (the shared `buildRatings()` reads
-  use the publishable key). After login it calls `POST /rest/v1/rpc/is_admin` and signs
-  out an account that is not an admin, or whose admin status cannot be checked (so the
-  migration must be applied before the new front end is deployed).
-- The esb-sync function uses the service role key, which bypasses RLS.
+  access token with all of its own reads and writes (the shared `buildRatings()` reads use
+  the publishable key).
+- After login it calls `POST /rest/v1/rpc/my_access`. An account without a role gets "This
+  account has no role in the admin panel." and is signed out. If the function does not
+  exist yet (HTTP 404, PostgREST code `PGRST202`: only the first migration is applied), it
+  falls back to `rpc/is_admin`: true means a super admin with every permission, false
+  means not an admin. Any other failure gives "Could not verify admin access. Try again."
+  and signs out.
+- The header shows `<email> · <role name>`, and the panel shows only what the role allows:
 
-Rollout of the migration:
+  | Tab | Shown with | Controls inside |
+  | --- | --- | --- |
+  | Players | always | Add player and delete: `players.edit`; visibility switch: `players.visibility`; photo upload: `avatars.upload`; achievement picker: `badges.assign` |
+  | Achievements | always | create, edit, delete: `achievements.edit` |
+  | Dashboard | always | |
+  | Log | `log.read` | Clear log: `log.clear` |
+  | Groups | `groups.edit` | |
+  | Monthly Reset | `reset.run` | |
+  | Adjustments | `adjustments.edit` | |
+  | Formula | `formula.edit` | |
+  | Users | `users.manage` | list (email, role, created, last sign-in), create (email, password, role), set password, delete, change role |
+  | Roles | the super admin only | create, rename and describe, permission checkboxes, delete |
 
-1. Apply it: paste it into the Supabase SQL editor and run it, or `supabase db push`.
-   It is safe to run again. A listed table that does not exist yet is skipped with a
-   warning and gets no protection, so check the output and run the migration again after
-   creating such a table.
-2. Add each admin (the user must already exist under Authentication > Users):
+- **Users tab:** the list and the create, set password and delete actions go through the
+  admin-users function. Changing a user's role upserts their `user_roles` row directly
+  (`on_conflict=user_id`); "No role (remove access)" deletes it. The role choices are the
+  roles you can grant, and your own row is read-only.
+- **Roles tab:** each role with its name, description, number of users (shown only with
+  `users.manage`, which is needed to read other people's `user_roles` rows) and permission
+  checkboxes; ticking one inserts a `role_permissions` row, unticking deletes it. Only
+  the super admin sees this tab, and the database accepts these writes only from the
+  super admin. The super role is shown locked, as "All permissions".
+
+### Rollout
+
+1. **Apply the migrations**, in order: `20260926000000_admin_only_writes.sql`, then
+   `20260927000000_roles.sql`. Paste each into the Supabase SQL editor and run it, or run
+   `supabase db push`. Both are safe to run again. A listed table that does not exist yet
+   is skipped with a warning and gets no protection, so check the output and run the file
+   again after creating such a table. The roles migration copies `admin_users` into
+   `user_roles` as super admins, only while `user_roles` is empty, so running it again
+   never brings back an admin you removed. Do not run the first migration again after the
+   second (it would bring back its `admin_users` checks); if you did, run the second
+   again.
+2. **Add a super admin** if none was copied (the user must already exist under
+   Authentication > Users):
    ```sql
-   insert into public.admin_users (user_id)
-   select id from auth.users where email = 'admin@example.com';
+   insert into public.user_roles (user_id, role_id)
+   select u.id, r.id
+   from auth.users u, public.roles r
+   where u.email = 'admin@example.com' and r.is_super
+   on conflict (user_id) do update set role_id = excluded.role_id;
    ```
-3. Deploy the new front end. The old admin panel writes with the publishable key, so
-   its writes stop working as soon as step 1 runs.
+   The SQL editor bypasses RLS, so this also works when you are locked out of the admin
+   panel. Everyone else can then be created and given roles in the Users tab.
+3. **Deploy the admin-users function** with the Supabase CLI:
+   ```sh
+   supabase login
+   supabase link --project-ref <project ref>
+   supabase functions deploy admin-users
+   ```
+   Keep JWT verification on (no `--no-verify-jwt`): every call carries a user's access
+   token.
+4. **Deploy the front end.** The new admin panel also works while only the first
+   migration is applied: every admin is then treated as a super admin, and the Users and
+   Roles tabs say they need the roles migration. The admin panel
+   from before the first migration writes with the publishable key, so its writes stop
+   working as soon as that migration runs. The one built for the first migration still
+   signs in after the roles migration, because `is_admin()` now means "has a role", but
+   its writes succeed only where the role allows.
+5. **Run the SQL test** (optional): paste `supabase/tests/roles_test.sql` into the SQL
+   editor and run it, or `psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f
+   supabase/tests/roles_test.sql`. It runs in one transaction that it rolls back, with
+   throwaway users, roles and rows. Each check prints a `PASS` notice (psql shows them;
+   the SQL editor may show only the last result), the first failure stops it with
+   `FAIL ...`, and a full pass ends with the row "roles test: all checks passed". It
+   expects the site tables to exist, and skips the `matches` checks when that table is
+   empty.
 
-Disabling public sign-ups is recommended but not required, since every write checks
-`admin_users`.
+Disabling public sign-ups (Authentication > Providers > Email) is recommended but not
+required: a new account has no role, so it cannot change anything.
 
 ## Local development
 
@@ -235,8 +390,13 @@ npm test
 
 Requires Node.js 20 or newer and has no dependencies to install. The tests load the
 site's scripts into one `vm` context the way the pages do (`tests/helpers/load.js`) and
-stub `fetch`. The CI workflow `.github/workflows/test.yml` runs `npm test` on every push
-and pull request.
+stub `fetch`. `tests/admin-users.test.js` imports the admin-users function's
+`handler.js` and runs it with fake dependencies. The CI workflow
+`.github/workflows/test.yml` runs `npm test` on every push and pull request.
+
+The database rules (RLS policies and triggers) are not covered by `npm test`; check them
+against the real project with `supabase/tests/roles_test.sql` (see
+[Rollout](#rollout), step 5).
 
 ## esb-sync edge function
 
@@ -281,3 +441,34 @@ The Supabase gateway also verifies a JWT in `Authorization` unless the function 
 deployed with `--no-verify-jwt`; `SYNC_SECRET` is checked either way. Nothing in this
 repository schedules the function; whatever calls it must send the secret once it is
 set.
+
+## admin-users edge function
+
+`supabase/functions/admin-users/` creates and deletes admin panel users and sets their
+passwords; the admin panel's Users tab calls it. `handler.js` holds the logic (plain
+JavaScript, everything it talks to is passed in, tested by `tests/admin-users.test.js`);
+`index.ts` wires it to `Deno.serve` and supabase-js with two clients: a service-role
+client for the Auth admin API and for reading roles and `user_roles`, and a client made
+with the request's `Authorization` header for `my_access()` and the `user_roles` writes,
+so RLS and the last-super-admin trigger check those as the caller.
+
+Every call is `POST {SUPABASE.URL}/functions/v1/admin-users` with a JSON body and the
+headers `Authorization: Bearer <user access token>` and `apikey`. CORS allows any origin
+(POST, OPTIONS). Every action needs `users.manage`.
+
+| Body | Response (200) |
+| --- | --- |
+| `{"action": "list"}` | `{"users": [{"id", "email", "created_at", "last_sign_in_at", "role_id"}]}` |
+| `{"action": "create", "email", "password", "role_id"}` | `{"user": {"id", "email", "role_id"}}`: a confirmed user with that password. The role is assigned as the caller, so it must be one they can grant; if that fails, the new user is deleted again. |
+| `{"action": "delete", "user_id"}` | `{"ok": true}` |
+| `{"action": "set_password", "user_id", "password"}` | `{"ok": true}` |
+
+`delete` and `set_password` never target the caller, and a target whose role the caller
+could not grant gets 403. Passwords need at least 8 characters. Errors are
+`{"error": "..."}` with 400 for bad input, 401 for a missing or invalid token, 403 for a
+missing permission, 404 for an unknown user, 405 for other methods, 409 when the email is
+taken or for the last super admin, and 500 otherwise.
+
+Deploy it with `supabase functions deploy admin-users` (see [Rollout](#rollout),
+step 3). It uses the project URL and keys that Supabase gives every function, so there
+are no secrets to set.

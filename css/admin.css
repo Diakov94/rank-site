@@ -227,6 +227,67 @@ body { display:flex; flex-direction:column; min-height:100vh; min-height:100dvh;
 .reset-controls-offset { margin-top:18px; } /* lines the button up with the selects under their labels */
 .formula-bar { align-items:flex-end; }
 
+/* ===== Roles: what the signed-in account may see =====
+ * Tabs and controls the role does not allow carry the hidden attribute; it wins over any
+ * display a class sets (.admin-form is flex, for one). */
+#panelSection [hidden] { display:none !important; }
+
+/* Header: "<email> · <role>" beside the links; a long email shortens, the role stays */
+.admin-identity { display:inline-flex; align-items:baseline; gap:6px; min-width:0; max-width:340px; font-size:13px; white-space:nowrap; }
+.admin-identity-email { min-width:0; overflow:hidden; text-overflow:ellipsis; opacity:0.7; }
+.admin-identity-sep { opacity:0.4; flex-shrink:0; }
+.admin-identity-role { flex-shrink:0; color:var(--accent); font-weight:600; }
+
+/* More than the original eight tabs: slightly narrower tabs, so a desktop row still fits them */
+@media (min-width: 1100px) {
+  .admin-tabs--compact { gap:2px; }
+  .admin-tabs--compact .admin-tab { padding:9px 10px; }
+}
+
+/* Shared bits of the Users and Roles tabs */
+.btn.btn-accent { background:var(--accent); color:#0b0f14; font-weight:700; font-size:13px; white-space:nowrap; }
+.btn.btn-accent:hover { background:#43d088; }
+.btn.btn-accent:disabled { opacity:0.5; cursor:not-allowed; }
+.form-msg { font-size:13px; }
+.admin-tag { display:inline-block; margin-left:8px; padding:1px 8px; border-radius:99px; border:1px solid var(--accent-border); background:var(--accent-soft); color:var(--accent); font-size:11px; font-weight:600; vertical-align:1px; white-space:nowrap; }
+.admin-tag--gold { border-color:rgba(218,184,35,0.5); background:rgba(218,184,35,0.1); color:#dab823; }
+.admin-input--email { width:220px; }
+.admin-input--password { width:180px; }
+.admin-input--role { min-width:170px; }
+.admin-input--role-name { width:180px; }
+.row-status { font-size:12px; color:#ff7676; opacity:0.85; padding:0 4px; } /* "Hidden" without the visibility switch */
+
+/* ===== Users ===== */
+.user-list { display:flex; flex-direction:column; gap:8px; }
+.user-row { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px 12px; padding:10px 14px; border-radius:var(--radius-md); background:var(--card-bg); border:1px solid var(--card-border); transition:opacity var(--t) var(--ease); }
+.user-row--self { border-color:var(--accent-border); }
+.user-row-info { flex:1 1 260px; min-width:0; }
+.user-row-email { display:flex; align-items:center; min-width:0; font-weight:600; font-size:14px; }
+.user-row-email-text { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.user-row-meta { margin-top:2px; font-size:12px; opacity:0.6; font-variant-numeric:tabular-nums; }
+.user-row-actions { display:flex; align-items:center; flex-wrap:wrap; justify-content:flex-end; gap:8px; }
+.user-role-static { font-size:13px; opacity:0.75; }
+.user-pw-form { flex:1 1 100%; display:flex; align-items:center; flex-wrap:wrap; gap:8px; padding-top:10px; border-top:1px solid var(--card-border); }
+.user-pw-input { width:260px; }
+
+/* ===== Roles ===== */
+.role-list { display:flex; flex-direction:column; gap:10px; }
+.role-card { padding:14px; border-radius:var(--radius-md); background:var(--card-bg); border:1px solid var(--card-border); transition:opacity var(--t) var(--ease); }
+.role-card--super { border-color:rgba(218,184,35,0.35); }
+.role-card-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
+.role-card-info { flex:1; min-width:0; }
+.role-card-name { font-weight:600; font-size:15px; overflow-wrap:anywhere; }
+.role-card-desc { margin-top:3px; font-size:13px; opacity:0.65; overflow-wrap:anywhere; }
+.role-card-meta { margin-top:4px; font-size:12px; opacity:0.5; }
+.role-card-actions { display:flex; gap:8px; flex-shrink:0; }
+.role-card-edit { display:flex; align-items:flex-end; flex-wrap:wrap; gap:10px; margin-top:12px; padding-top:12px; border-top:1px solid var(--card-border); }
+.role-card-edit-actions { display:flex; gap:8px; }
+.role-perms { display:grid; grid-template-columns:repeat(auto-fill, minmax(250px, 1fr)); gap:2px 16px; margin-top:12px; padding-top:10px; border-top:1px solid var(--card-border); }
+.role-perm { display:flex; align-items:center; gap:8px; padding:4px 0; font-size:13px; cursor:pointer; }
+.role-perm input { flex-shrink:0; width:16px; height:16px; margin:0; accent-color:var(--accent); cursor:inherit; }
+.role-perm--off { opacity:0.45; cursor:not-allowed; }
+.role-locked { margin:12px 0 0; padding-top:10px; border-top:1px solid var(--card-border); font-size:13px; opacity:0.7; }
+
 /* ============================================================
  * Tablet and phone. Everything below applies under 1100px only;
  * the desktop layout above is unchanged. Same breakpoints as the
@@ -247,6 +308,12 @@ body { display:flex; flex-direction:column; min-height:100vh; min-height:100dvh;
   .upload-btn, .trophy-btn { width:40px; height:40px; }
   .toggle { min-height:40px; }
   .delete-player-btn, .adj-del-btn { min-width:40px; min-height:40px; }
+
+  /* Users and Roles: long emails and names wrap, touch-sized actions and permission rows */
+  .user-row-email-text { white-space:normal; overflow-wrap:anywhere; }
+  .user-del-btn { min-width:40px; min-height:40px; }
+  .role-perm { min-height:40px; padding:0; }
+  .role-perm input { width:18px; height:18px; }
 }
 
 @media (max-width: 767.98px) {
@@ -285,6 +352,27 @@ body { display:flex; flex-direction:column; min-height:100vh; min-height:100dvh;
   .ach-card-view { flex-wrap:wrap; }
   .ach-card-info { flex-basis:calc(100% - 56px); }
   .ach-card-actions { flex:1 1 100%; justify-content:flex-end; }
+
+  /* Header: the account and role get their own line above the links */
+  .admin-identity { flex:1 1 100%; max-width:100%; }
+
+  /* Users: email and dates, then the role on its own line, then Set password and Delete */
+  .user-row-info { flex:1 1 100%; }
+  .user-row-actions { flex:1 1 100%; justify-content:flex-start; }
+  .user-row-actions .user-role-select { flex:1 1 100%; width:100%; min-width:0; min-height:40px; }
+  .user-del-btn { margin-left:auto; }
+  .user-pw-form > * { flex:1 1 auto; }
+  .user-pw-form .user-pw-input { flex:1 1 100%; width:100%; min-height:40px; }
+  .user-pw-form .form-msg { flex-basis:100%; }
+
+  /* Roles: the buttons go below the name, fields stack, one permission per line */
+  .role-card-head { flex-wrap:wrap; }
+  .role-card-actions { flex:1 1 100%; justify-content:flex-end; }
+  .role-card-edit { flex-direction:column; align-items:stretch; }
+  .role-card-edit > * { flex:none; min-width:0; }
+  .role-card-edit .admin-input { display:block; width:100%; min-width:0; min-height:40px; }
+  .role-card-edit-actions > .btn { flex:1 1 0; }
+  .role-perms { grid-template-columns:minmax(0, 1fr); }
 
   /* Dashboard: two cards per row */
   .dash-grid { grid-template-columns:repeat(auto-fill, minmax(130px, 1fr)); gap:8px; }

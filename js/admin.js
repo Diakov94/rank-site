@@ -14,11 +14,16 @@ const st = {
   playerAchievements: {},
   openPickerNick: null,
   currentTab: "players",
-  session: null,       // { access_token, refresh_token, expires_at, email }
+  session: null,       // { access_token, refresh_token, expires_at, email, user_id }
   groups: [],          // normalized rating groups from the engine, sorted by min desc
   loadErrors: {},      // read failures of loadAdminData, by source
   avatarVersions: {},  // nick -> version, set after an avatar upload in this session
   resetSaving: false,
+  access: null,        // what the account may do, from fetchAccess(); null outside the panel
+  users: [],           // Users tab: [{ id, email, created_at, last_sign_in_at, role_id }]
+  roleData: null,      // Users and Roles tabs: loadRoleData() result
+  roleUserCounts: null, // Roles tab: Map role id -> number of users, or null when unknown
+  creatingUser: false,
 };
 
 /* ===== DOM refs ===== */
@@ -40,15 +45,18 @@ const adminSearch   = document.getElementById("adminSearch");
 var SESSION_EXPIRED_MSG = "Session expired. Log in again.";
 var refreshInFlight = null;
 
-function sessionFromAuth(data, fallbackEmail) {
+/* `fallback` ({ email, user_id }) fills what the auth response leaves out. */
+function sessionFromAuth(data, fallback) {
   var now = Math.floor(Date.now() / 1000);
   var expiresAt = Number(data.expires_at);
   if (!Number.isFinite(expiresAt)) expiresAt = now + (Number(data.expires_in) || 3600);
+  fallback = fallback || {};
   return {
     access_token: data.access_token,
     refresh_token: data.refresh_token,
     expires_at: expiresAt,
-    email: (data.user && data.user.email) || fallbackEmail || "",
+    email: (data.user && data.user.email) || fallback.email || "",
+    user_id: (data.user && data.user.id) || fallback.user_id || "",
   };
 }
 
@@ -118,7 +126,7 @@ function refreshSession() {
         throw new Error(SESSION_EXPIRED_MSG);
       }
       if (!res.ok || !data || !data.access_token) throw new Error("Session refresh failed: HTTP " + res.status);
-      storeSession(sessionFromAuth(data, current.email));
+      storeSession(sessionFromAuth(data, current));
       return st.session.access_token;
     })().finally(function() { refreshInFlight = null; });
   }
@@ -127,22 +135,34 @@ function refreshSession() {
 
 function sessionExpired() {
   clearSession();
+  showLoginScreen(SESSION_EXPIRED_MSG);
+}
+
+/* Leaves the panel for the login screen, which shows `message`. */
+function showLoginScreen(message) {
+  st.access = null;
+  clearTypedPasswords();
   closeAchievementPicker();
   toggleLoadingOverlay("adminLoadingOverlay", false);
   panelSection.style.display = "none";
   loginSection.style.display = "";
-  showLoginError(SESSION_EXPIRED_MSG);
+  showLoginError(message);
 }
 
 /* ===== Supabase requests =====
- * The one helper for every admin REST and Storage call, reads and writes. `path` starts
- * with /rest/v1/ or /storage/v1/. opts: method, body (sent as JSON), raw + contentType (a
- * file upload), prefer (Prefer header), headers, mustMatch (for deletes and updates that must
- * hit a row: sends Prefer: return=representation and throws "Not found or not permitted"
- * when no row comes back). A 401 refreshes the token once and retries.
- * Throws an Error with .status on a non-2xx response; returns parsed JSON, or null for an
- * empty body. */
+ * The one helper for every admin REST, Storage and Edge Function call, reads and writes.
+ * `path` starts with /rest/v1/, /storage/v1/ or /functions/v1/. opts: method, body (sent as
+ * JSON), raw + contentType (a file upload), prefer (Prefer header), headers, mustMatch (for
+ * deletes and updates that must hit a row: sends Prefer: return=representation and throws
+ * "Not found or not permitted", with .notMatched, when no row comes back). A 401 refreshes
+ * the token once and retries.
+ * Throws an Error with .status, .body (the parsed JSON error body, or null) and .code (its
+ * PostgREST code, if any) on a non-2xx response; returns parsed JSON, or null for an empty
+ * body. */
+var ADMIN_PATH_PREFIX = /^\/(rest|storage|functions)\/v1\//;
+
 async function adminRequest(path, opts) {
+  if (!ADMIN_PATH_PREFIX.test(path)) throw new Error("adminRequest: unsupported path " + path);
   opts = opts || {};
   var extra = Object.assign({}, opts.headers);
   var body;
@@ -163,18 +183,36 @@ async function adminRequest(path, opts) {
   var res = await send(await getAccessToken());
   if (res.status === 401) {
     res = await send(await refreshSession());
+    /* A fresh token that an Edge Function still refuses was rejected by the function
+     * gateway's own JWT check, not because the session ended: report it, stay signed in. */
+    if (res.status === 401 && path.indexOf("/functions/v1/") === 0) {
+      var gatewayText = await res.text();
+      throw Object.assign(new Error(
+        "The server function rejected your sign-in (" + (gatewayText || "HTTP 401") + "). " +
+        "Deploy it with --no-verify-jwt, see DEPLOY.md."
+      ), { status: 401 });
+    }
     if (res.status === 401) {
       sessionExpired();
       throw Object.assign(new Error(SESSION_EXPIRED_MSG), { status: 401 });
     }
   }
   var text = await res.text();
-  if (!res.ok) throw Object.assign(new Error("HTTP " + res.status + (text ? ": " + text : "")), { status: res.status });
   var result = null;
   if (text) {
     try { result = JSON.parse(text); } catch (e) { result = text; }
   }
-  if (opts.mustMatch && (!Array.isArray(result) || !result.length)) throw new Error("Not found or not permitted");
+  if (!res.ok) {
+    var errBody = result && typeof result === "object" ? result : null;
+    throw Object.assign(new Error("HTTP " + res.status + (text ? ": " + text : "")), {
+      status: res.status,
+      body: errBody,
+      code: errBody && typeof errBody.code === "string" ? errBody.code : undefined,
+    });
+  }
+  if (opts.mustMatch && (!Array.isArray(result) || !result.length)) {
+    throw Object.assign(new Error("Not found or not permitted"), { notMatched: true });
+  }
   return result;
 }
 
@@ -183,9 +221,60 @@ function adminRows(table, select, order) {
   return sbFetchAll(table, select, order, function(path) { return adminRequest("/rest/v1/" + path); });
 }
 
-/* A .catch handler that rethrows the error with `prefix` before its message. */
+/* A .catch handler that rethrows the error with `prefix` before its message, keeping the
+ * details refusalText() reads. */
 function rethrowAs(prefix) {
-  return function(e) { throw new Error(prefix + e.message); };
+  return function(e) {
+    throw Object.assign(new Error(prefix + e.message), { status: e.status, body: e.body, code: e.code, notMatched: e.notMatched });
+  };
+}
+
+/* ===== Request errors ===== */
+function errorBody(err) {
+  return err && err.body && typeof err.body === "object" ? err.body : {};
+}
+
+/* The server's own explanation: PostgREST's or Storage's message, else the admin-users
+ * function's { error }. */
+function serverMessage(err) {
+  var body = errorBody(err);
+  if (typeof body.message === "string" && body.message) return body.message;
+  if (typeof body.error === "string" && body.error) return body.error;
+  return "";
+}
+
+/* A refusal by the database policies or the admin-users function: HTTP 403, PostgREST's
+ * insufficient_privilege (42501), or Storage's row-level security error (which some Storage
+ * versions send with HTTP 400 and statusCode "403" in the body). */
+function isPermissionError(err) {
+  if (!err) return false;
+  var body = errorBody(err);
+  return err.status === 403 || body.code === "42501" || String(body.statusCode) === "403" ||
+    /row-level security/i.test(serverMessage(err));
+}
+
+/* Clear text for the refusals a role runs into, or "" for any other failure: the last super
+ * admin, a missing permission (`action` completes "You don't have permission to …"), or an
+ * update or delete that reached no row the policies let through. */
+function refusalText(err, action) {
+  if (/last super admin/i.test(serverMessage(err))) return "Cannot remove the last super admin.";
+  if (isPermissionError(err)) {
+    /* The admin-users function explains its refusals in { error } ("You cannot grant this
+     * role"); the database's own text, and one that only repeats "no permission", add nothing. */
+    var body = errorBody(err);
+    var detail = typeof body.error === "string" && !body.message && !/permission|row-level security/i.test(body.error) ? body.error.trim() : "";
+    return "You don't have permission to " + action + "." + (detail ? " " + detail + (/[.!?]$/.test(detail) ? "" : ".") : "");
+  }
+  if (err && err.notMatched) return "Nothing was changed: it no longer exists, or you don't have permission to " + action + ".";
+  return "";
+}
+
+/* Readable text for a failed request of the Users and Roles tabs. `conflict` is the text for
+ * HTTP 409 (a duplicate, or a row still in use) when it is not about the last super admin. */
+function errorText(err, action, conflict) {
+  return refusalText(err, action) ||
+    (conflict && err && err.status === 409 ? conflict : "") ||
+    serverMessage(err) || (err && err.message) || String(err);
 }
 
 /* ===== Auth ===== */
@@ -204,6 +293,7 @@ async function tryLogin() {
   }
 
   loginPending = true;
+  st.access = null;
   loginBtn.disabled = true;
   loginBtn.textContent = "Checking…";
   try {
@@ -213,22 +303,23 @@ async function tryLogin() {
       showLoginError("Invalid email or password.");
       return;
     }
-    storeSession(sessionFromAuth(data, email));
-    var isAdmin;
+    storeSession(sessionFromAuth(data, { email: email }));
+    var access;
     try {
-      isAdmin = await checkIsAdmin();
+      access = await fetchAccess();
     } catch (e) {
       if (!st.session) return; // a rejected token already ended the session and said so
-      console.error("is_admin check failed:", e);
+      console.error("Access check failed:", e);
       await endSession();
-      showLoginError("Could not verify admin access. Try again.");
+      showLoginError(ACCESS_CHECK_FAILED_MSG);
       return;
     }
-    if (!isAdmin) {
+    if (!access.role) {
       await endSession();
-      showLoginError("This account is not an admin.");
+      showLoginError(noAccessMessage(access));
       return;
     }
+    st.access = access;
     passwordInput.value = "";
     writeLog("Logged in", adminEmail());
     enterPanel();
@@ -243,9 +334,188 @@ async function tryLogin() {
 }
 
 /* The server's answer to "is this account an admin?" (public.is_admin(), created by the
- * RLS migration). Throws when the question cannot be asked. */
+ * first RLS migration). Only asked before the roles migration is applied (see fetchAccess).
+ * Throws when the question cannot be asked. */
 async function checkIsAdmin() {
   return (await adminRequest("/rest/v1/rpc/is_admin", { method: "POST", body: {} })) === true;
+}
+
+/* ===== Access: roles and permissions =====
+ * After login the panel asks the database what the account may do (public.my_access()) and
+ * shows only the tabs and controls its role allows. The database enforces every write on its
+ * own; hiding a control only keeps the panel honest about what will work. */
+var ACCESS_CHECK_FAILED_MSG = "Could not verify admin access. Try again.";
+
+/* The fixed permission list of the roles migration (the permissions table holds the same
+ * keys and labels). Used when the table cannot be read and for the legacy fallback. */
+var ADMIN_PERMISSIONS = [
+  { key: "players.edit",       label: "Add and delete players" },
+  { key: "players.visibility", label: "Hide and show players" },
+  { key: "avatars.upload",     label: "Upload player photos" },
+  { key: "achievements.edit",  label: "Create, edit and delete achievements" },
+  { key: "badges.assign",      label: "Assign achievements to players" },
+  { key: "groups.edit",        label: "Edit rating groups" },
+  { key: "reset.run",          label: "Save monthly resets" },
+  { key: "adjustments.edit",   label: "Add and delete rating adjustments" },
+  { key: "formula.edit",       label: "Edit the rating formula" },
+  { key: "log.read",           label: "Read the activity log" },
+  { key: "log.clear",          label: "Clear the activity log" },
+  { key: "users.manage",       label: "Create and delete users, assign roles" },
+];
+var ALL_PERMISSION_KEYS = ADMIN_PERMISSIONS.map(function(p) { return p.key; });
+
+/* Every tab in display order, and the permission a tab needs (tabs not listed are open to
+ * every role). The Roles tab is for the super admin only (see tabAllowed). */
+var TAB_IDS = ["players", "achievements", "dashboard", "log", "groups", "reset", "adjustments", "formula", "users", "roles"];
+var TAB_PERMISSIONS = {
+  log: "log.read",
+  groups: "groups.edit",
+  reset: "reset.run",
+  adjustments: "adjustments.edit",
+  formula: "formula.edit",
+  users: "users.manage",
+};
+
+/* What the signed-in account may do: { role, permissions, legacy }. role is
+ * { id, name, is_super } or null (no access); permissions is a Set of keys. legacy: the roles
+ * migration is not applied yet (there is no my_access RPC), so public.is_admin() decides and
+ * an admin gets every permission. Throws when access cannot be verified; callers sign out. */
+async function fetchAccess() {
+  var data;
+  try {
+    data = await adminRequest("/rest/v1/rpc/my_access", { method: "POST", body: {} });
+  } catch (e) {
+    if (!(e.status === 404 && e.code === "PGRST202")) throw e;
+    var legacyAdmin = await checkIsAdmin();
+    return {
+      role: legacyAdmin ? { id: null, name: "Admin", is_super: true } : null,
+      permissions: new Set(legacyAdmin ? ALL_PERMISSION_KEYS : []),
+      legacy: true,
+    };
+  }
+  return parseAccess(data);
+}
+
+/* my_access() -> { role: { id, name, is_super } | null, permissions: [keys] }. Anything else
+ * throws, so a malformed answer never opens the panel. */
+function parseAccess(data) {
+  if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("Unexpected my_access response");
+  var role = data.role;
+  if (role === null || role === undefined) return { role: null, permissions: new Set(), legacy: false };
+  if (typeof role !== "object" || Array.isArray(role)) throw new Error("Unexpected my_access response");
+  var isSuper = role.is_super === true;
+  var keys = (Array.isArray(data.permissions) ? data.permissions : [])
+    .filter(function(k) { return typeof k === "string"; });
+  return {
+    role: { id: toRoleId(role.id), name: String(role.name ?? "") || "Unnamed role", is_super: isSuper },
+    permissions: new Set(isSuper ? ALL_PERMISSION_KEYS.concat(keys) : keys),
+    legacy: false,
+  };
+}
+
+function noAccessMessage(access) {
+  return access && access.legacy ? "This account is not an admin." : "This account has no role in the admin panel.";
+}
+
+/* Whether the signed-in account holds permission `key` (a super admin holds every one). */
+function can(key) {
+  var a = st.access;
+  return !!(a && a.role && (a.role.is_super || a.permissions.has(key)));
+}
+
+function isSuperAdmin() {
+  return !!(st.access && st.access.role && st.access.role.is_super);
+}
+
+function tabAllowed(tab) {
+  if (TAB_IDS.indexOf(tab) === -1 || !st.access || !st.access.role) return false;
+  if (tab === "roles") return isSuperAdmin(); // creating and editing roles is super-admin only
+  return !TAB_PERMISSIONS[tab] || can(TAB_PERMISSIONS[tab]);
+}
+
+/* A role id as a number, or null. */
+function toRoleId(value) {
+  if (value === null || value === undefined || value === "") return null;
+  var n = Number(value);
+  return Number.isSafeInteger(n) ? n : null;
+}
+
+/* The signed-in user's id (the session keeps it since this version; older stored sessions
+ * get it at their next refresh). */
+function ownUserId() {
+  return (st.session && st.session.user_id) || "";
+}
+
+function setHidden(id, hidden) {
+  var el = document.getElementById(id);
+  if (el) el.hidden = hidden;
+}
+
+/* Shows the account and its role in the header, and only the tabs and static controls the
+ * role allows. Rows (players, achievements) check can() when they are drawn. */
+function applyAccess() {
+  var a = st.access;
+  var identity = document.getElementById("adminIdentity");
+  if (identity) {
+    var email = adminEmail() || "";
+    var roleName = a && a.role ? a.role.name : "";
+    var emailEl = document.createElement("span");
+    emailEl.className = "admin-identity-email";
+    emailEl.textContent = email;
+    var roleEl = document.createElement("span");
+    roleEl.className = "admin-identity-role";
+    roleEl.textContent = roleName;
+    var sep = document.createElement("span");
+    sep.className = "admin-identity-sep";
+    sep.textContent = "·";
+    identity.replaceChildren(emailEl, sep, roleEl);
+    identity.title = email + " · " + roleName;
+    identity.hidden = !(a && a.role);
+  }
+
+  var visibleTabs = 0;
+  TAB_IDS.forEach(function(key) {
+    var allowed = tabAllowed(key);
+    setHidden(tabDomId("tab", key), !allowed);
+    if (allowed) visibleTabs++;
+  });
+  /* More tabs than the original eight: a little less padding, so they fit on a desktop row. */
+  var tabRow = document.querySelector(".admin-tabs");
+  if (tabRow) tabRow.classList.toggle("admin-tabs--compact", visibleTabs > 8);
+
+  setHidden("addPlayerForm", !can("players.edit"));
+  setHidden("addAchBtn", !can("achievements.edit"));
+  if (!can("achievements.edit")) {
+    var achForm = document.getElementById("addAchForm");
+    if (achForm) achForm.classList.remove("open");
+  }
+  setHidden("clearLogBtn", !can("log.clear"));
+  if (!can("badges.assign")) closeAchievementPicker();
+
+  if (!tabAllowed(st.currentTab)) switchTab("players");
+}
+
+/* Asks the database again what the account may do (after a change to the account's own role)
+ * and redraws what depends on it. A failure keeps the current view: the database still
+ * enforces every write. */
+async function reloadAccess() {
+  var access;
+  try {
+    access = await fetchAccess();
+  } catch (e) {
+    console.warn("Could not reload access:", e);
+    return;
+  }
+  if (!st.session) return;
+  if (!access.role) {
+    await endSession();
+    showLoginScreen(noAccessMessage(access));
+    return;
+  }
+  st.access = access;
+  applyAccess();
+  renderList();
+  renderAchievementsTab();
 }
 
 /* Forget the session here and, best effort, on the server. */
@@ -274,11 +544,46 @@ async function logout() {
 }
 
 /* ===== Panel ===== */
+/* Opens the panel for the account in st.access (set by the caller after fetchAccess). */
 function enterPanel() {
+  applyAccess();
   loginSection.style.display = "none";
   panelSection.style.display = "block";
+  switchTab(st.currentTab); // after a new login, reload the open tab for this account
   setTimeout(function() { toggleLoadingOverlay("adminLoadingOverlay", true); }, 0);
   loadAdminData();
+}
+
+/* A stored session opens the panel again once its access is verified, as at login. */
+async function resumeSession() {
+  /* A login submitted meanwhile takes over: it checks access and opens the panel itself. */
+  function superseded() { return loginPending || panelSection.style.display !== "none"; }
+  try {
+    await getAccessToken();
+  } catch (err) {
+    console.error("Session check failed:", err);
+    if (st.session && panelSection.style.display === "none") showLoginError("Connection error. Try again.");
+    return;
+  }
+  if (superseded()) return;
+  var access;
+  try {
+    access = await fetchAccess();
+  } catch (err) {
+    if (superseded() || !st.session) return; // !st.session: a rejected token already said so
+    console.error("Access check failed:", err);
+    await endSession();
+    showLoginError(ACCESS_CHECK_FAILED_MSG);
+    return;
+  }
+  if (superseded()) return;
+  if (!access.role) {
+    await endSession();
+    showLoginError(noAccessMessage(access));
+    return;
+  }
+  st.access = access;
+  enterPanel();
 }
 
 async function loadAdminData() {
@@ -382,18 +687,24 @@ function numOrEmpty(value) {
 }
 
 /* ===== Tab switching ===== */
+/* "tab" + "users" -> "tabUsers"; "section" + "users" -> "sectionUsers". */
+function tabDomId(prefix, tab) {
+  return prefix + tab.charAt(0).toUpperCase() + tab.slice(1);
+}
+
+/* A tab the role does not allow opens the Players tab instead. */
 function switchTab(tab) {
+  if (!tabAllowed(tab)) tab = "players";
   st.currentTab = tab;
-  var tabIds = ["players", "achievements", "dashboard", "log", "groups", "reset", "adjustments", "formula"];
-  tabIds.forEach(function(key) {
-    var btn = document.getElementById("tab" + key.charAt(0).toUpperCase() + key.slice(1));
-    var sec = document.getElementById("section" + key.charAt(0).toUpperCase() + key.slice(1));
+  TAB_IDS.forEach(function(key) {
+    var btn = document.getElementById(tabDomId("tab", key));
+    var sec = document.getElementById(tabDomId("section", key));
     if (btn) btn.classList.toggle("tab-active", key === tab);
     if (sec) sec.style.display = key === tab ? "block" : "none";
   });
   /* On a narrow screen the tab row scrolls sideways: bring the chosen tab fully into view.
    * Only the row scrolls, never the page; where every tab fits (desktop) nothing moves. */
-  var activeTab = document.getElementById("tab" + tab.charAt(0).toUpperCase() + tab.slice(1));
+  var activeTab = document.getElementById(tabDomId("tab", tab));
   var tabRow = activeTab && activeTab.parentElement;
   if (tabRow && tabRow.scrollWidth > tabRow.clientWidth) {
     var tabBox = activeTab.getBoundingClientRect(), rowBox = tabRow.getBoundingClientRect();
@@ -406,6 +717,8 @@ function switchTab(tab) {
   if (tab === "reset") loadResetTab();
   if (tab === "adjustments") loadAdjustmentsTab();
   if (tab === "formula") loadFormulaSettings();
+  if (tab === "users") loadUsersTab();
+  if (tab === "roles") loadRolesTab();
 }
 
 /* ===== Rating formula settings ===== */
@@ -466,7 +779,7 @@ async function saveFormulaSettings() {
     writeLog("Rating formula updated", records.map(function(r) { return r.key + "=" + r.value; }).join(", "));
     showFormulaMessage("✓ Saved. Reload the site to apply.", false);
   } catch (err) {
-    showFormulaMessage("Save failed: " + err.message, true);
+    showFormulaMessage(refusalText(err, "edit the rating formula") || "Save failed: " + err.message, true);
   } finally { btn.disabled = false; }
 }
 function showFormulaMessage(message, error) {
@@ -662,7 +975,7 @@ async function saveMonthlyReset() {
       body: records,
       prefer: "return=representation",
     }).catch(function(e) {
-      throw new Error(e.message + "\nNothing was deleted; the previously saved reset is unchanged.");
+      throw new Error((refusalText(e, "save monthly resets") || e.message) + "\nNothing was deleted; the previously saved reset is unchanged.");
     });
     var newIds = (Array.isArray(inserted) ? inserted : [])
       .map(function(r) { return Number(r.id); })
@@ -678,7 +991,7 @@ async function saveMonthlyReset() {
         { method: "DELETE" }
       );
     } catch (e) {
-      alert("The new reset for " + dateVal + " was saved, but the previous rows could not be removed: " + e.message +
+      alert("The new reset for " + dateVal + " was saved, but the previous rows could not be removed: " + (refusalText(e, "save monthly resets") || e.message) +
         "\nThe new values still apply (same-day rows are applied in id order). Save again to clean up.");
     }
 
@@ -789,7 +1102,7 @@ async function deleteAdjustment(id) {
     await adminRequest("/rest/v1/rating_adjustments?id=eq." + id, { method: "DELETE", mustMatch: true });
     writeLog("Adjustment deleted", String(id));
     loadAdjustmentsTab();
-  } catch (e) { alert("Error: " + e.message); }
+  } catch (e) { alert(refusalText(e, "delete rating adjustments") || "Error: " + e.message); }
 }
 
 document.addEventListener("DOMContentLoaded", function() {
@@ -813,7 +1126,7 @@ document.addEventListener("DOMContentLoaded", function() {
       document.getElementById("adjReason").value = "";
       loadAdjustmentsTab();
     } catch (e) {
-      alert("Error: " + e.message);
+      alert(refusalText(e, "add rating adjustments") || "Error: " + e.message);
     } finally {
       addBtn.disabled = false; addBtn.textContent = "+ Add";
     }
@@ -917,7 +1230,7 @@ async function saveGroup(groupObj, name, minRating, color, coef, rowEl, entries)
       saveBtn.textContent = "Save";
     }, 1400);
   } catch (err) {
-    alert("Error: " + err.message);
+    alert(refusalText(err, "edit rating groups") || "Error: " + err.message);
     saveBtn.disabled = false;
     saveBtn.textContent = "Save";
   }
@@ -930,7 +1243,9 @@ function renderAchievementsTab() {
   container.innerHTML = st.loadErrors.achievements ? errorHtml(st.loadErrors.achievements) : "";
 
   if (!st.achievements.length) {
-    if (!st.loadErrors.achievements) container.innerHTML = '<p class="loading-msg">No achievements yet. Create one below.</p>';
+    if (!st.loadErrors.achievements) {
+      container.innerHTML = '<p class="loading-msg">' + (can("achievements.edit") ? "No achievements yet. Create one below." : "No achievements yet.") + '</p>';
+    }
     return;
   }
 
@@ -981,6 +1296,13 @@ function makeAchCard(ach) {
         '<button class="btn ach-cancel-edit-btn" type="button" style="font-size:13px;">Cancel</button>' +
       '</div>' +
     '</div>';
+
+  /* Without achievements.edit the card is read-only. */
+  if (!can("achievements.edit")) {
+    card.querySelector(".ach-card-actions").remove();
+    card.querySelector(".ach-card-edit").remove();
+    return card;
+  }
 
   /* Edit toggle */
   card.querySelector(".ach-edit-btn").addEventListener("click", function() {
@@ -1061,7 +1383,7 @@ async function createAchievement(name, url, file) {
 
     renderAchievementsTab();
   } catch (err) {
-    alert("Error: " + err.message);
+    alert(refusalText(err, "create achievements") || "Error: " + err.message);
   } finally {
     if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = "Save"; }
   }
@@ -1091,7 +1413,7 @@ async function saveAchievementEdit(id, name, url, file, cardEl) {
 
     renderAchievementsTab();
   } catch (err) {
-    alert("Error: " + err.message);
+    alert(refusalText(err, "edit achievements") || "Error: " + err.message);
     saveBtn.disabled = false; saveBtn.textContent = "Save";
   }
 }
@@ -1111,13 +1433,14 @@ async function deleteAchievement(id, cardEl) {
     renderList();
   } catch (err) {
     if (cardEl) cardEl.style.opacity = "1";
-    alert("Delete failed: " + err.message);
+    alert(refusalText(err, "delete achievements") || "Delete failed: " + err.message);
   }
 }
 
 /* ===== Achievement picker (per player) ===== */
 function openAchievementPicker(nick, btnEl) {
   closeAchievementPicker();
+  if (!can("badges.assign")) return;
   if (!st.achievements.length) {
     alert(st.loadErrors.achievements || "No achievements yet. Create one in the Achievements tab.");
     return;
@@ -1227,7 +1550,7 @@ async function togglePlayerAchievement(nick, achId, assign, checkboxEl) {
     else        { st.playerAchievements[nick].add(achId); }
     if (checkboxEl) checkboxEl.checked = !assign;
     updateTrophyBtn(nick);
-    alert("Error: " + err.message);
+    alert(refusalText(err, "assign achievements to players") || "Error: " + err.message);
   }
 }
 
@@ -1273,8 +1596,15 @@ function renderList() {
   playerList.replaceChildren(frag);
 }
 
+/* Row actions are drawn only for the permissions the role holds; without players.visibility
+ * a hidden player shows a plain "Hidden" label instead of the switch. */
 function makeRow(p) {
   var rating = p.rating != null ? Number(p.rating).toFixed(1) : "—";
+  var visible = !st.hiddenNicks.has(p.nick);
+  var canUpload = can("avatars.upload");
+  var canBadges = can("badges.assign");
+  var canVisibility = can("players.visibility");
+  var canDelete = can("players.edit");
 
   var row = document.createElement("div");
   row.dataset.nick = p.nick;
@@ -1287,34 +1617,41 @@ function makeRow(p) {
       '</div>' +
     '</div>' +
     '<div class="row-actions">' +
-      '<label class="upload-btn" title="Upload photo">📷<input class="avatar-file-input" type="file" accept="image/*" style="display:none" /></label>' +
-      '<button class="trophy-btn" type="button">🏆</button>' +
-      '<label class="toggle">' +
-        '<input type="checkbox" />' +
-        '<span class="toggle-track"><span class="toggle-thumb"></span></span>' +
-        '<span class="toggle-label"></span>' +
-      '</label>' +
-      '<button class="btn delete-player-btn" type="button" title="Delete player" style="font-size:11px;color:#ff7676;padding:3px 8px;">✕</button>' +
+      (canUpload ? '<label class="upload-btn" title="Upload photo">📷<input class="avatar-file-input" type="file" accept="image/*" style="display:none" /></label>' : '') +
+      (canBadges ? '<button class="trophy-btn" type="button">🏆</button>' : '') +
+      (canVisibility
+        ? '<label class="toggle">' +
+            '<input type="checkbox" />' +
+            '<span class="toggle-track"><span class="toggle-thumb"></span></span>' +
+            '<span class="toggle-label"></span>' +
+          '</label>'
+        : visible ? '' : '<span class="row-status">Hidden</span>') +
+      (canDelete ? '<button class="btn delete-player-btn" type="button" title="Delete player" style="font-size:11px;color:#ff7676;padding:3px 8px;">✕</button>' : '') +
     '</div>';
-  paintVisibility(row, !st.hiddenNicks.has(p.nick));
-  paintTrophy(row.querySelector(".trophy-btn"), p.nick);
+  paintVisibility(row, visible);
 
   var img = row.querySelector(".player-row-avatar");
   setAvatar(img, p.nick, 64, avatarSrc(p.nick));
   var input = row.querySelector(".avatar-file-input");
-  input.addEventListener("change", function(e) {
+  if (input) input.addEventListener("change", function(e) {
     var file = e.target.files[0];
     if (file) uploadAvatar(p.nick, file, img);
     input.value = "";
   });
-  row.querySelector("input[type=checkbox]").addEventListener("change", function(e) {
+  var toggleBox = row.querySelector(".toggle input");
+  if (toggleBox) toggleBox.addEventListener("change", function(e) {
     onToggle(p.nick, e.target.checked, row);
   });
-  row.querySelector(".trophy-btn").addEventListener("click", function(e) {
-    e.stopPropagation();
-    openAchievementPicker(p.nick, this);
-  });
-  row.querySelector(".delete-player-btn").addEventListener("click", function() {
+  var trophyBtn = row.querySelector(".trophy-btn");
+  if (trophyBtn) {
+    paintTrophy(trophyBtn, p.nick);
+    trophyBtn.addEventListener("click", function(e) {
+      e.stopPropagation();
+      openAchievementPicker(p.nick, this);
+    });
+  }
+  var deleteBtn = row.querySelector(".delete-player-btn");
+  if (deleteBtn) deleteBtn.addEventListener("click", function() {
     if (confirm('Delete player "' + p.nick + '"? This cannot be undone.')) {
       deletePlayer(p.nick, row);
     }
@@ -1331,7 +1668,7 @@ async function uploadAvatar(nick, file, imgEl) {
     setAvatar(imgEl, nick, 64, avatarSrc(nick));
     writeLog("Avatar uploaded", nick);
   } catch (err) {
-    console.error(err); alert("Upload error: " + err.message);
+    console.error(err); alert(refusalText(err, "upload player photos") || "Upload error: " + err.message);
   } finally {
     imgEl.style.opacity = "1";
   }
@@ -1374,7 +1711,7 @@ async function onToggle(nick, visible, row) {
   } catch (err) {
     console.error("Supabase error:", err);
     applyVisibility(nick, !visible, row);
-    alert("Could not " + (visible ? "show " : "hide ") + nick + ": " + err.message);
+    alert(refusalText(err, "hide and show players") || "Could not " + (visible ? "show " : "hide ") + nick + ": " + err.message);
   } finally {
     if (box) box.disabled = false;
   }
@@ -1441,7 +1778,7 @@ async function clearLog() {
   if (!confirm("Clear entire activity log? This cannot be undone.")) return;
   try {
     await adminRequest("/rest/v1/admin_log?id=gte.0", { method: "DELETE" });
-  } catch (e) { alert("Failed to clear log: " + e.message); return; }
+  } catch (e) { alert(refusalText(e, "clear the activity log") || "Failed to clear log: " + e.message); return; }
   await writeLog("Log cleared");
   loadLog();
 }
@@ -1693,6 +2030,657 @@ function monthGridHtml(players) {
   }).join('');
 }
 
+/* ===== Roles data (Users and Roles tabs) ===== */
+/* Shown in both tabs while the database has no roles yet (legacy access, see fetchAccess). */
+var ROLES_MIGRATION_MSG = "User and role management needs the roles migration. Apply it (see supabase/migrations and the README), then log in again.";
+
+/* The permissions, the roles and what each role holds, read with the admin's token (staff may
+ * read all three). Returns { permissions: [{ key, label, description }], roles: [{ id, name,
+ * description, is_super, permissions: Set }], byId: Map }. The super role holds every
+ * permission without rows of its own. */
+async function loadRoleData() {
+  var results = await Promise.all([
+    adminRows("permissions", "key,label,description,sort", "sort.asc,key.asc"),
+    adminRows("roles", "id,name,description,is_super", "id.asc"),
+    adminRows("role_permissions", "role_id,permission_key", "role_id.asc,permission_key.asc"),
+  ]);
+  var permissions = results[0]
+    .filter(function(p) { return p && typeof p.key === "string"; })
+    .map(function(p) { return { key: p.key, label: String(p.label || p.key), description: String(p.description || "") }; });
+  if (!permissions.length) {
+    permissions = ADMIN_PERMISSIONS.map(function(p) { return { key: p.key, label: p.label, description: "" }; });
+  }
+  var roles = results[1]
+    .filter(function(r) { return r && toRoleId(r.id) !== null; })
+    .map(function(r) {
+      return {
+        id: toRoleId(r.id),
+        name: String(r.name ?? ""),
+        description: String(r.description ?? ""),
+        is_super: r.is_super === true,
+        permissions: new Set(),
+      };
+    });
+  var byId = new Map(roles.map(function(r) { return [r.id, r]; }));
+  results[2].forEach(function(link) {
+    var role = link && byId.get(toRoleId(link.role_id));
+    if (role && typeof link.permission_key === "string") role.permissions.add(link.permission_key);
+  });
+  roles.forEach(function(role) {
+    if (role.is_super) permissions.forEach(function(p) { role.permissions.add(p.key); });
+  });
+  roles.sort(compareRoles);
+  return { permissions: permissions, roles: roles, byId: byId };
+}
+
+/* The super role first, then by name. */
+function compareRoles(a, b) {
+  return (b.is_super - a.is_super) || a.name.localeCompare(b.name) || a.id - b.id;
+}
+
+function roleById(id) {
+  return (id !== null && st.roleData && st.roleData.byId.get(id)) || null;
+}
+
+/* Whether the signed-in account may give `role` to someone (as private.can_grant_role
+ * decides): a super admin any role; anyone else a role that is not super and whose
+ * permissions they all hold. */
+function canGrantRole(role) {
+  if (!role) return false;
+  if (isSuperAdmin()) return true;
+  if (role.is_super) return false;
+  return Array.from(role.permissions).every(function(key) { return can(key); });
+}
+
+function grantableRoles() {
+  return st.roleData ? st.roleData.roles.filter(canGrantRole) : [];
+}
+
+function isOwnRole(role) {
+  return !!(role && st.access && st.access.role && st.access.role.id === role.id);
+}
+
+/* A date and time as in the activity log, or `empty` for a missing or invalid value. */
+function formatStamp(value, empty) {
+  if (!value) return empty;
+  var d = new Date(value);
+  if (Number.isNaN(d.getTime())) return empty;
+  return d.toLocaleDateString("uk-UA") + " " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function makeOption(value, text, selected) {
+  var opt = document.createElement("option");
+  opt.value = value;
+  opt.textContent = text;
+  if (selected) opt.selected = true;
+  return opt;
+}
+
+/* Shows `text` in a form's message span: red for an error, green otherwise (cleared after a
+ * few seconds). */
+function showFormMessage(id, text, isError) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  clearTimeout(el._hideTimer);
+  el.textContent = text;
+  el.style.color = isError ? "#ff7676" : "var(--accent)";
+  el.hidden = false;
+  if (!isError) el._hideTimer = setTimeout(function() { el.hidden = true; }, 4000);
+}
+
+/* ===== Users tab =====
+ * Accounts come from the admin-users Edge Function, which can read and change auth.users (the
+ * page cannot). Roles are assigned in user_roles through the REST API with the admin's token,
+ * so the database decides who may grant which role. */
+var ADMIN_USERS_PATH = "/functions/v1/admin-users";
+var MIN_PASSWORD_LENGTH = 8;
+var EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+var usersLoadSeq = 0;
+
+/* POST to the admin-users function. A 404 without the function's own { error } means the
+ * function itself is missing. */
+async function callAdminUsers(payload) {
+  try {
+    return await adminRequest(ADMIN_USERS_PATH, { method: "POST", body: payload });
+  } catch (e) {
+    if (e.status === 404 && typeof errorBody(e).error !== "string") {
+      throw Object.assign(new Error("The admin-users Edge Function is not deployed (HTTP 404)."), { status: 404 });
+    }
+    throw e;
+  }
+}
+
+function normalizeUsers(list) {
+  return (Array.isArray(list) ? list : [])
+    .filter(function(u) { return u && typeof u.id === "string" && u.id; })
+    .map(function(u) {
+      return {
+        id: u.id,
+        email: String(u.email || ""),
+        created_at: u.created_at || null,
+        last_sign_in_at: u.last_sign_in_at || null,
+        role_id: toRoleId(u.role_id),
+      };
+    })
+    .sort(function(a, b) { return a.email.localeCompare(b.email); });
+}
+
+/* Passwords typed into the Users tab (new user, Set password) do not stay in the page when it
+ * goes back to the login screen, where another account may log in next. */
+function clearTypedPasswords() {
+  var fields = document.querySelectorAll("#newUserPassword, .user-pw-input");
+  for (var i = 0; i < fields.length; i++) fields[i].value = "";
+}
+
+function isSelf(user) {
+  var me = ownUserId();
+  if (me) return user.id === me;
+  var email = adminEmail();
+  return !!email && user.email.toLowerCase() === email.toLowerCase();
+}
+
+function roleNameOf(roleId) {
+  if (roleId === null) return "No role";
+  var role = roleById(roleId);
+  return role ? role.name : "Unknown role";
+}
+
+async function loadUsersTab() {
+  var list = document.getElementById("userList");
+  if (!list) return;
+  var seq = ++usersLoadSeq;
+  var legacy = !!(st.access && st.access.legacy);
+  setHidden("createUserForm", legacy);
+  if (legacy) {
+    list.innerHTML = '<p class="loading-msg">' + escapeHtml(ROLES_MIGRATION_MSG) + '</p>';
+    return;
+  }
+  list.innerHTML = '<p class="loading-msg">Loading…</p>';
+  st.roleData = null;
+  fillNewUserRoleSelect();
+  try {
+    var results = await Promise.all([loadRoleData(), callAdminUsers({ action: "list" })]);
+    if (seq !== usersLoadSeq) return; // a newer load replaced this one
+    st.roleData = results[0];
+    st.users = normalizeUsers(results[1] && results[1].users);
+    fillNewUserRoleSelect();
+    renderUsers();
+  } catch (e) {
+    if (seq !== usersLoadSeq) return;
+    console.error("Users load failed:", e);
+    list.innerHTML = errorHtml("Could not load users: " + errorText(e, "manage users"));
+    fillNewUserRoleSelect("Not available");
+  }
+}
+
+/* The create form offers only the roles the account can grant, with no role chosen up front,
+ * so nobody is made a super admin by default. `unavailable` replaces "Loading…" while there
+ * are no roles to offer because the tab failed to load. */
+function fillNewUserRoleSelect(unavailable) {
+  var select = document.getElementById("newUserRole");
+  if (!select) return;
+  var roles = grantableRoles();
+  select.replaceChildren(makeOption("", st.roleData ? (roles.length ? "Choose a role…" : "No role you can assign") : unavailable || "Loading…", true));
+  roles.forEach(function(role) { select.appendChild(makeOption(String(role.id), role.name, false)); });
+  select.disabled = !roles.length;
+  updateCreateUserBtn();
+}
+
+function updateCreateUserBtn() {
+  var btn = document.getElementById("createUserBtn");
+  if (btn) btn.disabled = st.creatingUser || !grantableRoles().length;
+}
+
+function renderUsers() {
+  var list = document.getElementById("userList");
+  if (!list) return;
+  if (!st.users.length) {
+    list.innerHTML = '<p class="loading-msg">No users yet.</p>';
+    return;
+  }
+  var frag = document.createDocumentFragment();
+  st.users.forEach(function(user) { frag.appendChild(makeUserRow(user)); });
+  list.replaceChildren(frag);
+}
+
+/* One account. Its role, password and the account itself can be changed only by someone who
+ * could grant its current role, and never by the account itself: such rows are read-only. */
+function makeUserRow(user) {
+  var self = isSelf(user);
+  var role = roleById(user.role_id);
+  var manageable = !self && (user.role_id === null || canGrantRole(role));
+  var roleText = roleNameOf(user.role_id);
+
+  var row = document.createElement("div");
+  row.className = "user-row" + (self ? " user-row--self" : "");
+  row.dataset.userId = user.id;
+  row.innerHTML =
+    '<div class="user-row-info">' +
+      '<div class="user-row-email">' +
+        '<span class="user-row-email-text" title="' + escapeHtml(user.email || user.id) + '">' + escapeHtml(user.email || user.id) + '</span>' +
+        (self ? '<span class="admin-tag">You</span>' : '') +
+      '</div>' +
+      '<div class="user-row-meta">Created ' + escapeHtml(formatStamp(user.created_at, "—")) +
+        ' · Last sign-in ' + escapeHtml(formatStamp(user.last_sign_in_at, "never")) + '</div>' +
+    '</div>' +
+    '<div class="user-row-actions">' +
+      (manageable
+        ? '<select class="admin-input admin-input--role user-role-select"></select>' +
+          '<button class="btn user-pw-btn" type="button" style="font-size:12px;">🔑 Set password</button>' +
+          '<button class="btn user-del-btn" type="button" title="Delete user" style="font-size:11px;color:#ff7676;padding:3px 8px;">✕</button>'
+        : '<span class="user-role-static">' + escapeHtml(roleText) + '</span>') +
+    '</div>' +
+    (manageable
+      ? '<div class="user-pw-form" hidden>' +
+          '<input class="admin-input user-pw-input" type="password" autocomplete="new-password" placeholder="New password (at least ' + MIN_PASSWORD_LENGTH + ' characters)" />' +
+          '<button class="btn btn-accent user-pw-save" type="button">Save password</button>' +
+          '<button class="btn user-pw-cancel" type="button" style="font-size:13px;">Cancel</button>' +
+          '<span class="form-msg user-pw-msg" hidden></span>' +
+        '</div>'
+      : '');
+
+  if (!manageable) {
+    row.querySelector(".user-role-static").title = self
+      ? "You cannot change your own role."
+      : "This user's role has permissions you don't hold, so you cannot change this account.";
+    return row;
+  }
+
+  var select = row.querySelector(".user-role-select");
+  select.setAttribute("aria-label", "Role of " + (user.email || user.id));
+  if (user.role_id === null) select.appendChild(makeOption("", "No role", true));
+  grantableRoles().forEach(function(r) {
+    select.appendChild(makeOption(String(r.id), r.name, r.id === user.role_id));
+  });
+  if (user.role_id !== null) select.appendChild(makeOption("", "No role (remove access)", false));
+  select.addEventListener("change", function() { changeUserRole(user, row, select); });
+
+  var pwForm = row.querySelector(".user-pw-form");
+  var pwInput = row.querySelector(".user-pw-input");
+  pwInput.setAttribute("aria-label", "New password for " + (user.email || user.id));
+  row.querySelector(".user-pw-btn").addEventListener("click", function() {
+    pwForm.hidden = !pwForm.hidden;
+    if (!pwForm.hidden) pwInput.focus();
+  });
+  row.querySelector(".user-pw-cancel").addEventListener("click", function() {
+    pwInput.value = "";
+    row.querySelector(".user-pw-msg").hidden = true;
+    pwForm.hidden = true;
+  });
+  row.querySelector(".user-pw-save").addEventListener("click", function() { setUserPassword(user, row); });
+  pwInput.addEventListener("keydown", function(e) { if (e.key === "Enter") setUserPassword(user, row); });
+  row.querySelector(".user-del-btn").addEventListener("click", function() { deleteUser(user, row); });
+  return row;
+}
+
+/* Gives the user another role (an upsert on user_roles.user_id), or none. */
+async function changeUserRole(user, row, select) {
+  var newId = toRoleId(select.value);
+  var before = user.role_id;
+  if (newId === before) return;
+  var who = user.email || user.id;
+  if (newId === null && !confirm('Remove the role of "' + who + '"? They will no longer be able to use the admin panel.')) {
+    select.value = String(before);
+    return;
+  }
+  select.disabled = true;
+  try {
+    if (newId === null) {
+      await adminRequest("/rest/v1/user_roles?user_id=eq." + encodeURIComponent(user.id), { method: "DELETE", mustMatch: true });
+    } else {
+      await adminRequest("/rest/v1/user_roles?on_conflict=user_id", {
+        method: "POST",
+        body: { user_id: user.id, role_id: newId },
+        prefer: "resolution=merge-duplicates,return=minimal",
+      });
+    }
+    user.role_id = newId;
+    writeLog("Role changed", who + ": " + roleNameOf(before) + " → " + roleNameOf(newId));
+    row.replaceWith(makeUserRow(user)); // the "No role" options depend on the role
+  } catch (e) {
+    select.value = before === null ? "" : String(before);
+    select.disabled = false;
+    alert(errorText(e, newId === null ? "remove this user's role" : "give this user that role"));
+  }
+}
+
+async function setUserPassword(user, row) {
+  var input = row.querySelector(".user-pw-input");
+  var save = row.querySelector(".user-pw-save");
+  var msg = row.querySelector(".user-pw-msg");
+  var password = input.value;
+  function show(text) { msg.textContent = text; msg.style.color = "#ff7676"; msg.hidden = false; }
+  if (save.disabled) return;
+  if (password.length < MIN_PASSWORD_LENGTH) {
+    show("Password must be at least " + MIN_PASSWORD_LENGTH + " characters.");
+    input.focus();
+    return;
+  }
+  msg.hidden = true;
+  save.disabled = true;
+  save.textContent = "Saving…";
+  try {
+    await callAdminUsers({ action: "set_password", user_id: user.id, password: password });
+    input.value = "";
+    writeLog("Password set", user.email || user.id);
+    row.querySelector(".user-pw-form").hidden = true;
+    var pwBtn = row.querySelector(".user-pw-btn");
+    pwBtn.textContent = "✓ Password set";
+    setTimeout(function() { pwBtn.textContent = "🔑 Set password"; }, 2500);
+  } catch (e) {
+    show(errorText(e, "set this user's password"));
+  } finally {
+    save.disabled = false;
+    save.textContent = "Save password";
+  }
+}
+
+async function deleteUser(user, row) {
+  var who = user.email || user.id;
+  if (!confirm('Delete user "' + who + '"? They will no longer be able to log in. This cannot be undone.')) return;
+  var btn = row.querySelector(".user-del-btn");
+  btn.disabled = true;
+  row.style.opacity = "0.4";
+  try {
+    await callAdminUsers({ action: "delete", user_id: user.id });
+    writeLog("User deleted", who + " (" + roleNameOf(user.role_id) + ")");
+    st.users = st.users.filter(function(u) { return u.id !== user.id; });
+    renderUsers();
+  } catch (e) {
+    row.style.opacity = "1";
+    btn.disabled = false;
+    alert(errorText(e, "delete this user"));
+  }
+}
+
+async function createUser() {
+  if (st.creatingUser) return;
+  var emailEl = document.getElementById("newUserEmail");
+  var passwordEl = document.getElementById("newUserPassword");
+  var roleEl = document.getElementById("newUserRole");
+  var btn = document.getElementById("createUserBtn");
+  var email = emailEl.value.trim();
+  var password = passwordEl.value;
+  var role = roleById(toRoleId(roleEl.value));
+
+  if (!EMAIL_PATTERN.test(email)) { showFormMessage("createUserMsg", "Enter a valid email address.", true); return; }
+  if (password.length < MIN_PASSWORD_LENGTH) {
+    showFormMessage("createUserMsg", "Password must be at least " + MIN_PASSWORD_LENGTH + " characters.", true);
+    return;
+  }
+  if (!role || !canGrantRole(role)) { showFormMessage("createUserMsg", "Choose a role.", true); return; }
+
+  st.creatingUser = true;
+  updateCreateUserBtn();
+  btn.textContent = "Creating…";
+  var created = false;
+  try {
+    await callAdminUsers({ action: "create", email: email, password: password, role_id: role.id });
+    created = true;
+    writeLog("User created", email + " (" + role.name + ")");
+    emailEl.value = "";
+    passwordEl.value = "";
+    roleEl.value = "";
+    showFormMessage("createUserMsg", "✓ " + email + " created.", false);
+  } catch (e) {
+    showFormMessage("createUserMsg", errorText(e, "create users with that role", "A user with this email already exists."), true);
+  } finally {
+    st.creatingUser = false;
+    btn.textContent = "+ Create user";
+    updateCreateUserBtn();
+  }
+  if (created) loadUsersTab();
+}
+
+/* ===== Roles tab =====
+ * Roles and their permissions are rows in roles and role_permissions, written through the
+ * REST API. Only the super admin sees this tab, and the database lets only the super admin
+ * write those rows, never for the super role itself. */
+var rolesLoadSeq = 0;
+
+async function loadRolesTab() {
+  var list = document.getElementById("roleList");
+  if (!list) return;
+  var seq = ++rolesLoadSeq;
+  var legacy = !!(st.access && st.access.legacy);
+  setHidden("createRoleForm", legacy);
+  if (legacy) {
+    list.innerHTML = '<p class="loading-msg">' + escapeHtml(ROLES_MIGRATION_MSG) + '</p>';
+    return;
+  }
+  list.innerHTML = '<p class="loading-msg">Loading…</p>';
+  try {
+    /* Other people's user_roles rows are readable only with users.manage; without it the
+     * number of users per role is left out. */
+    var results = await Promise.all([
+      loadRoleData(),
+      can("users.manage") ? adminRows("user_roles", "user_id,role_id", "user_id.asc") : Promise.resolve(null),
+    ]);
+    if (seq !== rolesLoadSeq) return; // a newer load replaced this one
+    st.roleData = results[0];
+    st.roleUserCounts = null;
+    if (results[1]) {
+      st.roleUserCounts = new Map();
+      results[1].forEach(function(r) {
+        var id = toRoleId(r && r.role_id);
+        if (id !== null) st.roleUserCounts.set(id, (st.roleUserCounts.get(id) || 0) + 1);
+      });
+    }
+    renderRoles();
+  } catch (e) {
+    if (seq !== rolesLoadSeq) return;
+    console.error("Roles load failed:", e);
+    list.innerHTML = errorHtml("Could not load roles: " + errorText(e, "manage roles"));
+  }
+}
+
+function renderRoles() {
+  var list = document.getElementById("roleList");
+  if (!list || !st.roleData) return;
+  if (!st.roleData.roles.length) {
+    list.innerHTML = '<p class="loading-msg">No roles yet.</p>';
+    return;
+  }
+  var frag = document.createDocumentFragment();
+  st.roleData.roles.forEach(function(role) { frag.appendChild(makeRoleCard(role)); });
+  list.replaceChildren(frag);
+}
+
+/* One role: name, description, users, and a checkbox per permission. Only permissions the
+ * account holds can be switched; the super role is locked. */
+function makeRoleCard(role) {
+  var count = st.roleUserCounts ? (st.roleUserCounts.get(role.id) || 0) : null;
+  var card = document.createElement("div");
+  card.className = "role-card" + (role.is_super ? " role-card--super" : "");
+  card.dataset.roleId = role.id;
+  card.innerHTML =
+    '<div class="role-card-head">' +
+      '<div class="role-card-info">' +
+        '<div class="role-card-name">' + escapeHtml(role.name) +
+          (role.is_super ? '<span class="admin-tag admin-tag--gold">🔒 All permissions</span>' : '') +
+          (isOwnRole(role) ? '<span class="admin-tag">Your role</span>' : '') +
+        '</div>' +
+        (role.description ? '<div class="role-card-desc">' + escapeHtml(role.description) + '</div>' : '') +
+        (count !== null ? '<div class="role-card-meta">' + count + (count === 1 ? " user" : " users") + '</div>' : '') +
+      '</div>' +
+      (role.is_super ? '' :
+        '<div class="role-card-actions">' +
+          '<button class="btn role-edit-btn" type="button" style="font-size:12px;">✏ Edit</button>' +
+          '<button class="btn role-del-btn" type="button" style="font-size:12px;color:#ff7676;">✕ Delete</button>' +
+        '</div>') +
+    '</div>' +
+    (role.is_super
+      ? '<p class="role-locked">This role has every permission, including ones added later. It cannot be edited or deleted.</p>'
+      : '<div class="role-card-edit" hidden>' +
+          '<label class="admin-field"><span class="tg-label">Name</span>' +
+            '<input class="admin-input admin-input--role-name role-edit-name" type="text" value="' + escapeHtml(role.name) + '" /></label>' +
+          '<label class="admin-field admin-form-grow"><span class="tg-label">Description</span>' +
+            '<input class="admin-input admin-input--full role-edit-desc" type="text" value="' + escapeHtml(role.description) + '" /></label>' +
+          '<div class="role-card-edit-actions">' +
+            '<button class="btn btn-accent role-save-btn" type="button">Save</button>' +
+            '<button class="btn role-cancel-btn" type="button" style="font-size:13px;">Cancel</button>' +
+          '</div>' +
+        '</div>' +
+        '<div class="role-perms"></div>');
+  if (role.is_super) return card;
+
+  var perms = card.querySelector(".role-perms");
+  st.roleData.permissions.forEach(function(perm) {
+    var held = can(perm.key);
+    var label = document.createElement("label");
+    label.className = "role-perm" + (held ? "" : " role-perm--off");
+    label.title = held
+      ? (perm.description ? perm.description + " " : "") + "(" + perm.key + ")"
+      : "You don't have this permission, so you cannot grant or remove it.";
+    var box = document.createElement("input");
+    box.type = "checkbox";
+    box.checked = role.permissions.has(perm.key);
+    box.disabled = !held;
+    var text = document.createElement("span");
+    text.textContent = perm.label;
+    label.append(box, text);
+    box.addEventListener("change", function() { toggleRolePermission(role, perm, box); });
+    perms.appendChild(label);
+  });
+
+  var edit = card.querySelector(".role-card-edit");
+  var nameInput = card.querySelector(".role-edit-name");
+  var descInput = card.querySelector(".role-edit-desc");
+  card.querySelector(".role-edit-btn").addEventListener("click", function() {
+    edit.hidden = !edit.hidden;
+    if (!edit.hidden) nameInput.focus();
+  });
+  card.querySelector(".role-cancel-btn").addEventListener("click", function() {
+    nameInput.value = role.name;
+    descInput.value = role.description;
+    edit.hidden = true;
+  });
+  card.querySelector(".role-save-btn").addEventListener("click", function() { saveRole(role, card); });
+  [nameInput, descInput].forEach(function(input) {
+    input.addEventListener("keydown", function(e) { if (e.key === "Enter") saveRole(role, card); });
+  });
+  card.querySelector(".role-del-btn").addEventListener("click", function() { deleteRole(role, card); });
+  return card;
+}
+
+/* Grants or removes one permission of a role. A change to the account's own role changes
+ * what the account may do, so its access is loaded again. */
+async function toggleRolePermission(role, perm, box) {
+  var grant = box.checked;
+  var own = isOwnRole(role);
+  if (!grant && own && !confirm('"' + role.name + '" is your own role. Removing "' + perm.label + '" takes this permission away from you too. Continue?')) {
+    box.checked = true;
+    return;
+  }
+  box.disabled = true;
+  try {
+    if (grant) {
+      await adminRequest("/rest/v1/role_permissions", {
+        method: "POST",
+        body: { role_id: role.id, permission_key: perm.key },
+        prefer: "resolution=ignore-duplicates,return=minimal",
+      });
+      role.permissions.add(perm.key);
+    } else {
+      await adminRequest(
+        "/rest/v1/role_permissions?role_id=eq." + encodeURIComponent(role.id) + "&permission_key=eq." + encodeURIComponent(perm.key),
+        { method: "DELETE", mustMatch: true }
+      );
+      role.permissions.delete(perm.key);
+    }
+    writeLog("Role updated", role.name + ": " + (grant ? "granted" : "removed") + ' "' + perm.label + '"');
+    if (own) {
+      await reloadAccess();
+      if (st.currentTab === "roles") renderRoles();
+    }
+  } catch (e) {
+    box.checked = !grant;
+    alert(errorText(e, grant ? "grant this permission" : "remove this permission"));
+  } finally {
+    box.disabled = !can(perm.key);
+  }
+}
+
+async function saveRole(role, card) {
+  var btn = card.querySelector(".role-save-btn");
+  if (btn.disabled) return;
+  var name = card.querySelector(".role-edit-name").value.trim();
+  var description = card.querySelector(".role-edit-desc").value.trim();
+  if (!name) { alert("Enter a role name."); return; }
+  if (name === role.name && description === role.description) {
+    card.querySelector(".role-card-edit").hidden = true;
+    return;
+  }
+  btn.disabled = true;
+  btn.textContent = "Saving…";
+  try {
+    var rows = await adminRequest("/rest/v1/roles?id=eq." + encodeURIComponent(role.id), {
+      method: "PATCH",
+      body: { name: name, description: description },
+      mustMatch: true,
+    });
+    var oldName = role.name, oldDescription = role.description;
+    role.name = String(rows[0].name ?? name);
+    role.description = String(rows[0].description ?? description);
+    var changes = [];
+    if (role.name !== oldName) changes.push('renamed from "' + oldName + '"');
+    if (role.description !== oldDescription) changes.push("description changed");
+    writeLog("Role updated", role.name + ": " + (changes.join(", ") || "saved"));
+    if (isOwnRole(role)) {
+      st.access.role.name = role.name; // the header shows it
+      applyAccess();
+    }
+    st.roleData.roles.sort(compareRoles);
+    renderRoles();
+  } catch (e) {
+    alert(errorText(e, "edit roles", "A role with this name already exists."));
+    btn.disabled = false;
+    btn.textContent = "Save";
+  }
+}
+
+async function deleteRole(role, card) {
+  if (!confirm('Delete role "' + role.name + '"?')) return;
+  card.style.opacity = "0.4";
+  try {
+    await adminRequest("/rest/v1/roles?id=eq." + encodeURIComponent(role.id), { method: "DELETE", mustMatch: true });
+    writeLog("Role deleted", role.name);
+    st.roleData.roles = st.roleData.roles.filter(function(r) { return r !== role; });
+    st.roleData.byId.delete(role.id);
+    renderRoles();
+  } catch (e) {
+    card.style.opacity = "1";
+    alert(errorText(e, "delete roles", "Role is still assigned to users."));
+  }
+}
+
+async function createRole() {
+  var nameEl = document.getElementById("newRoleName");
+  var descEl = document.getElementById("newRoleDesc");
+  var btn = document.getElementById("createRoleBtn");
+  if (btn.disabled) return;
+  var name = nameEl.value.trim();
+  var description = descEl.value.trim();
+  if (!name) { showFormMessage("createRoleMsg", "Enter a role name.", true); return; }
+  btn.disabled = true;
+  btn.textContent = "Creating…";
+  var created = false;
+  try {
+    await adminRequest("/rest/v1/roles", { method: "POST", body: { name: name, description: description } });
+    created = true;
+    writeLog("Role created", name);
+    nameEl.value = "";
+    descEl.value = "";
+    showFormMessage("createRoleMsg", "✓ " + name + " created. Choose its permissions below.", false);
+  } catch (e) {
+    showFormMessage("createRoleMsg", errorText(e, "create roles", "A role with this name already exists."), true);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "+ Create role";
+  }
+  if (created) loadRolesTab();
+}
+
 /* ===== Boot ===== */
 loginBtn.addEventListener("click", tryLogin);
 if (emailInput) emailInput.addEventListener("keydown", function(e) { if (e.key === "Enter") passwordInput.focus(); });
@@ -1722,6 +2710,21 @@ document.addEventListener("DOMContentLoaded", function() {
   if (tabFormula) tabFormula.addEventListener("click", function() { switchTab("formula"); });
   var saveFormulaBtn = document.getElementById("saveFormulaBtn");
   if (saveFormulaBtn) saveFormulaBtn.addEventListener("click", saveFormulaSettings);
+  var tabUsers = document.getElementById("tabUsers");
+  if (tabUsers) tabUsers.addEventListener("click", function() { switchTab("users"); });
+  var tabRoles = document.getElementById("tabRoles");
+  if (tabRoles) tabRoles.addEventListener("click", function() { switchTab("roles"); });
+
+  /* Users and Roles forms: the button, or Enter in a field, submits */
+  [["createUserBtn", createUser, ["newUserEmail", "newUserPassword"]],
+   ["createRoleBtn", createRole, ["newRoleName", "newRoleDesc"]]].forEach(function(form) {
+    var btn = document.getElementById(form[0]);
+    if (btn) btn.addEventListener("click", form[1]);
+    form[2].forEach(function(id) {
+      var input = document.getElementById(id);
+      if (input) input.addEventListener("keydown", function(e) { if (e.key === "Enter") form[1](); });
+    });
+  });
 
   /* Add new player */
   var addPlayerBtn = document.getElementById("addPlayerBtn");
@@ -1773,13 +2776,7 @@ document.addEventListener("DOMContentLoaded", function() {
 
 st.session = readStoredSession();
 if (st.session) {
-  /* A login submitted while this check was running has already opened the panel. */
-  getAccessToken().then(function() {
-    if (panelSection.style.display === "none") enterPanel();
-  }, function(err) {
-    console.error("Session check failed:", err);
-    if (st.session && panelSection.style.display === "none") showLoginError("Connection error. Try again.");
-  });
+  resumeSession();
 } else {
   if (emailInput) emailInput.focus();
 }
@@ -1795,7 +2792,7 @@ async function deletePlayer(nick, rowEl) {
     updateStats();
   } catch (e) {
     if (rowEl) rowEl.style.opacity = "1";
-    alert("Error: " + e.message);
+    alert(refusalText(e, "delete players") || "Error: " + e.message);
   }
 }
 
@@ -1830,7 +2827,7 @@ async function addNewPlayer() {
     if (nickInput) nickInput.value = "";
     if (ratingInput) ratingInput.value = "";
   } catch (e) {
-    showAddMsg(e.status === 409 ? nick + " already exists." : "Error: " + e.message, "error");
+    showAddMsg(e.status === 409 ? nick + " already exists." : refusalText(e, "add players") || "Error: " + e.message, "error");
   } finally {
     btn.disabled = false; btn.textContent = "+ Add Player";
   }

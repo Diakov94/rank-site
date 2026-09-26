@@ -22,8 +22,8 @@ const els = {
   refresh:       $("refresh"),
 
   profileTitle:      $("profileTitle"),
-  currentRating:     $("currentRating"),
-  currentRatingNote: $("currentRatingNote"),
+  closingRating:     $("closingRating"),
+  closingRatingNote: $("closingRatingNote"),
   liveStat:          $("liveStat"),
   liveRating:        $("liveRating"),
   liveRatingNote:    $("liveRatingNote"),
@@ -466,16 +466,16 @@ function selectPlayer(p, { user = false, scroll = false, animate = true } = {}) 
 
 /* The profile's rating tiles. They ignore the date range, so they change only with the
  * selection and with each data load (which re-selects the player).
- * Current: the rating at the end of the previous work day (07:30 -> 07:30 Kyiv time).
+ * Closing: the rating at the close of the previous work day (07:30 -> 07:30 Kyiv time).
  * Live: the latest rating, which includes the current work day's results once there are any. */
 function renderRatingTiles(p) {
   const workDay = workDayOf();
-  const current = lastEntryOnOrBefore(p.ends, shiftIsoDate(workDay, -1));
+  const closing = lastEntryOnOrBefore(p.ends, shiftIsoDate(workDay, -1));
   const live = p.ends.at(-1) ?? null;
   const liveToday = live?.date === workDay;
 
-  if (els.currentRating) els.currentRating.textContent = fmt(current?.rating);
-  if (els.currentRatingNote) els.currentRatingNote.textContent = current ? `end of ${current.date}` : "—";
+  if (els.closingRating) els.closingRating.textContent = fmt(closing?.rating);
+  if (els.closingRatingNote) els.closingRatingNote.textContent = closing ? `end of ${closing.date}` : "—";
   if (els.liveRating) els.liveRating.textContent = fmt(live?.rating);
   if (els.liveRatingNote) {
     els.liveRatingNote.textContent = !live ? "—" : liveToday ? `work day ${workDay}` : `last results ${live.date}`;
