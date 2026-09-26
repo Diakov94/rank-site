@@ -59,6 +59,7 @@ const els = {
 
   adminLink:   $("adminLink"),
   loadNotice:  $("loadNotice"),
+  a11yStatus:  $("a11yStatus"),
 };
 
 /* ================== STATE ================== */
@@ -100,22 +101,23 @@ async function init() {
   state.deepLinkNick = new URLSearchParams(window.location.search).get("player");
   showAdminLink();
 
-  els.refresh?.addEventListener("click", () => loadData());
+  els.refresh?.addEventListener("click", () => loadData({ userRequested: true }));
   els.search?.addEventListener("input", debounce(onSearch, 120));
 
-  const onRangeChange = () => {
-    let from = els.dateFrom?.value || "";
-    let to   = els.dateTo?.value   || "";
+  // Chrome fires "change" on every keystroke in a date field, so the handler never writes to the
+  // inputs while the viewer types: it waits out partial years (0002) and dates outside min/max,
+  // and swaps a reversed range in state only.
+  const onRangeChange = (e) => {
+    if (!e.target.validity.valid) return;
+    // The other field may hold an unfinished entry too: keep its last good value.
+    let from = (els.dateFrom?.validity.valid ? els.dateFrom.value : state.dateFrom) || "";
+    let to   = (els.dateTo?.validity.valid ? els.dateTo.value : state.dateTo) || "";
     if (!from && !to) {
       state.rangeIsDefault = true;
       applyDefaultRange();
     } else {
       state.rangeIsDefault = false;
-      if (from && to && from > to) {
-        [from, to] = [to, from];
-        els.dateFrom.value = from;
-        els.dateTo.value   = to;
-      }
+      if (from && to && from > to) [from, to] = [to, from];
       state.dateFrom = from;
       state.dateTo   = to;
     }
@@ -123,6 +125,13 @@ async function init() {
   };
   els.dateFrom?.addEventListener("change", onRangeChange);
   els.dateTo?.addEventListener("change",   onRangeChange);
+  // Once focus leaves the range, the inputs show the range in use (swapped, or an unfinished
+  // entry put back).
+  els.dateFrom?.parentElement?.addEventListener("focusout", (e) => {
+    if (e.currentTarget.contains(e.relatedTarget)) return;
+    els.dateFrom.value = state.dateFrom;
+    els.dateTo.value   = state.dateTo;
+  });
 
   // Resize → redraw chart without re-animating (a running animation picks up the new size)
   window.addEventListener("resize", debounce(() => {
@@ -146,7 +155,24 @@ async function init() {
 
   els.compareClose?.addEventListener("click", closeCompareModal);
   els.compareModal?.querySelector(".compare-backdrop")?.addEventListener("click", closeCompareModal);
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeCompareModal(); });
+  // Escape also dismisses the hover cards, tooltips and the load notice (keyboard users cannot
+  // click the notice, and hover content must be dismissable without moving the pointer).
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    closeCompareModal();
+    hideMiniCard();
+    hideChartTip(); // chartHoverIdx stays, so the tip returns only at another point
+    document.querySelectorAll(".ach-badge:hover, .ach-badge:focus-visible")
+      .forEach((b) => b.classList.add("tip-dismissed"));
+    showLoadNotice(false);
+  });
+  // An achievement name hidden by Escape comes back once the pointer or focus leaves its badge.
+  const undismissTip = (e) => {
+    const badge = e.target.closest?.(".ach-badge");
+    if (badge && !badge.contains(e.relatedTarget)) badge.classList.remove("tip-dismissed");
+  };
+  document.addEventListener("pointerout", undismissTip);
+  document.addEventListener("focusout", undismissTip);
 
   els.loadNotice?.addEventListener("click", () => showLoadNotice(false));
 
@@ -180,14 +206,17 @@ function initBackToTop() {
 
   btn.addEventListener("click", () => {
     window.scrollTo({ top: 0, behavior: "smooth" });
+    // The button hides at the top: move focus up with the view instead of losing it to <body>
+    document.querySelector(".brand h1")?.focus({ preventScroll: true });
   });
 }
 
 /* ================== LOAD ================== */
 /* The first load shows the full-screen overlay. Refreshes (the Refresh button, the timer)
  * keep the page usable: only the button shows "Loading…", the selected player and the
- * compare pick are kept, and a failed refresh leaves the current data on screen. */
-async function loadData({ initial = false } = {}) {
+ * compare pick are kept, and a failed refresh leaves the current data on screen.
+ * userRequested (the Refresh button): screen readers hear when the data has been updated. */
+async function loadData({ initial = false, userRequested = false } = {}) {
   if (state.loading) return;
   state.loading = true;
   setLoading(true, initial);
@@ -202,6 +231,7 @@ async function loadData({ initial = false } = {}) {
     ]);
     applyData(engine, hiddenRows, achievements, playerAchievements);
     showLoadNotice(false);
+    if (userRequested) announce("Data updated.");
   } catch (err) {
     console.error("Data load failed:", err);
     if (state.loadedAt) {
@@ -268,14 +298,28 @@ function applyData({ leaderboard, history, groups }, hiddenRows, achievements, p
 function setLoading(isLoading, initial) {
   if (initial) toggleLoadingOverlay("loadingOverlay", isLoading);
   if (!els.refresh) return;
-  els.refresh.disabled = isLoading;
+  // aria-disabled, not disabled: disabling the focused button would drop focus to <body>.
+  // loadData ignores clicks while loading.
+  els.refresh.setAttribute("aria-disabled", String(isLoading));
   els.refresh.textContent = isLoading ? "Loading…" : "Refresh";
 }
 
 function showLoadNotice(show) {
   if (!els.loadNotice) return;
+  const message = show ? "Couldn't refresh the data. Showing the last loaded results." : "";
   els.loadNotice.hidden = !show;
-  els.loadNotice.textContent = show ? "Couldn't refresh the data. Showing the last loaded results." : "";
+  els.loadNotice.textContent = message;
+  if (show) announce(message); // hiding it must not cancel a pending announcement
+}
+
+/* Reads `message` out through the always-present, visually hidden role=status region. The
+ * region is cleared first and filled a moment later, so a repeated message is read again. */
+let announceTimer = 0;
+function announce(message) {
+  if (!els.a11yStatus) return;
+  clearTimeout(announceTimer);
+  els.a11yStatus.textContent = "";
+  if (message) announceTimer = setTimeout(() => { els.a11yStatus.textContent = message; }, 50);
 }
 
 /* ================== DATE RANGE ================== */
@@ -389,7 +433,7 @@ function renderTable() {
     ? state.globalRows.filter((p) => p.nick.toLowerCase().includes(q))
     : state.globalRows;
 
-  // A refresh rebuilds the rows: keep keyboard focus on the same row or "vs" button.
+  // A refresh rebuilds the rows: keep keyboard focus on the same player or "vs" button.
   const focused = els.tbody.contains(document.activeElement) ? document.activeElement : null;
   const focusNick = focused?.dataset.nick;
   const focusCmp = Boolean(focused?.classList.contains("cmp-btn"));
@@ -405,7 +449,6 @@ function renderTable() {
       const tr = document.createElement("tr");
       const rank = state.globalRankByNick.get(p.nick) ?? null;
       tr.dataset.nick = p.nick;
-      tr.tabIndex = 0;
 
       if (rank === 1) tr.classList.add("rank-1");
       else if (rank === 2) tr.classList.add("rank-2");
@@ -413,10 +456,13 @@ function renderTable() {
 
       if (state.selected?.nick === p.nick) tr.classList.add("active");
 
+      // The nickname is a button (a row cannot be one), so screen readers hear a control and
+      // which player is selected; the row's click handler still picks the player.
       const isCmpSelected = state.compareNick === p.nick;
+      const nick = escapeHtml(p.nick);
       tr.innerHTML = `
         <td>${rank ?? "—"}</td>
-        <td>${escapeHtml(p.nick)}<button class="cmp-btn${isCmpSelected ? " selected" : ""}" title="Compare with another player" data-nick="${escapeHtml(p.nick)}">vs</button></td>
+        <td><button type="button" class="row-pick" data-nick="${nick}"${state.selected?.nick === p.nick ? ' aria-current="true"' : ""}>${nick}</button><button type="button" class="cmp-btn${isCmpSelected ? " selected" : ""}" aria-pressed="${isCmpSelected}" aria-label="vs ${nick}" title="Compare with another player" data-nick="${nick}">vs</button></td>
         <td class="right">${fmt(p.rating)}</td>
       `;
       tr.querySelector(".cmp-btn").addEventListener("click", (e) => {
@@ -424,11 +470,6 @@ function renderTable() {
         onCompareClick(p.nick);
       });
       tr.addEventListener("click", () => selectPlayer(p, { user: true, scroll: true }));
-      tr.addEventListener("keydown", (e) => {
-        if (e.target !== tr || (e.key !== "Enter" && e.key !== " ")) return;
-        e.preventDefault();
-        selectPlayer(p, { user: true, scroll: true });
-      });
       tr.addEventListener("mouseenter", (e) => showMiniCard(p, e));
       tr.addEventListener("mousemove",  (e) => moveMiniCard(e));
       tr.addEventListener("mouseleave", hideMiniCard);
@@ -440,7 +481,7 @@ function renderTable() {
 
   if (focusNick != null) {
     const tr = rowFor(focusNick);
-    (focusCmp ? tr?.querySelector(".cmp-btn") : tr)?.focus({ preventScroll: true });
+    tr?.querySelector(focusCmp ? ".cmp-btn" : ".row-pick")?.focus({ preventScroll: true });
   }
   return filtered;
 }
@@ -459,7 +500,13 @@ function selectPlayer(p, { user = false, scroll = false, animate = true } = {}) 
   state.selected = p;
   if (user) updateURL(p.nick);
 
-  for (const tr of els.tbody?.rows ?? []) tr.classList.toggle("active", tr.dataset.nick === p.nick);
+  for (const tr of els.tbody?.rows ?? []) {
+    const on = tr.dataset.nick === p.nick;
+    tr.classList.toggle("active", on);
+    const pick = tr.querySelector(".row-pick");
+    if (on) pick?.setAttribute("aria-current", "true");
+    else pick?.removeAttribute("aria-current");
+  }
 
   renderRatingTiles(p);
   renderProfile(animate);
@@ -588,12 +635,15 @@ function onCompareClick(nick) {
   state.compareNick = first ? null : nick;
   markCompareButtons();
   if (first && first !== nick) openCompareModal(first, nick);
+  else announce(first ? "Comparison pick cleared." : `Picked ${nick}. Choose another player's vs button to compare.`);
 }
 
 /* Updates the "vs" buttons in place, so the button keeps keyboard focus. */
 function markCompareButtons() {
   els.tbody?.querySelectorAll(".cmp-btn").forEach((b) => {
-    b.classList.toggle("selected", b.dataset.nick === state.compareNick);
+    const picked = b.dataset.nick === state.compareNick;
+    b.classList.toggle("selected", picked);
+    b.setAttribute("aria-pressed", String(picked));
   });
 }
 
@@ -667,7 +717,7 @@ function openCompareModal(nick1, nick2) {
 
 /* aria-modal: while the comparison is open the rest of the page takes no focus or clicks. */
 function setPageInert(on) {
-  for (const el of document.body.children) if (el !== els.compareModal) el.inert = on;
+  for (const el of document.body.children) if (el !== els.compareModal && el !== els.a11yStatus) el.inert = on;
 }
 
 function closeCompareModal() {
@@ -694,9 +744,10 @@ function renderAchievements(nick) {
     const name = escapeHtml(ach.name);
     const icon = safeUrl(ach.icon_url);
     const href = safeUrl(ach.url);
+    // With an icon, its alt names the badge, so screen readers skip the tip (no name read twice).
     const inner =
       (icon ? `<img src="${escapeHtml(icon)}" alt="${name}" loading="lazy" />` : "") +
-      `<span class="ach-badge-tip">${name}</span>`;
+      `<span class="ach-badge-tip"${icon ? ' aria-hidden="true"' : ""}>${name}</span>`;
 
     let badge;
     if (href) {
@@ -1120,6 +1171,7 @@ function deltaClass(v) {
 function onSearch() {
   const rows = renderTable();
   if (!(els.search?.value ?? "").trim()) return;
+  announce(rows.length ? `${rows.length} player${rows.length === 1 ? "" : "s"} found` : "No players found");
   const first = rows[0];
   if (first && first.nick !== state.selected?.nick) selectPlayer(first, { user: true });
 }

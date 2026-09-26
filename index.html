@@ -26,12 +26,12 @@
 <header class="topbar">
   <div class="container topbar-row">
     <div class="brand">
-      <h1>ESportsBattle Rank</h1>
+      <h1 tabindex="-1">ESportsBattle Rank</h1>
       <p class="subtitle">Public leaderboard and player rating history</p>
     </div>
     <div class="actions">
-      <input id="search" type="search" placeholder="Search by nickname..." aria-label="Search players" autocomplete="off" />
-      <button id="refresh" class="btn" type="button" aria-label="Refresh data">Refresh</button>
+      <input id="search" type="search" placeholder="Search by nickname..." aria-label="Search by nickname" autocomplete="off" />
+      <button id="refresh" class="btn" type="button">Refresh</button>
 <a id="adminLink" href="./admin.html" class="btn" style="display:none;text-decoration:none;" title="Admin panel">Admin</a>
     </div>
   </div>
@@ -122,8 +122,9 @@
       <div id="chartTip" class="chartTip" hidden></div>
     </div>
 
-    <h3>History</h3>
-    <ul id="history"></ul>
+    <h3 id="historyTitle">History</h3>
+    <!-- tabindex: a scrolling list with nothing focusable inside still scrolls by keyboard (Safari) -->
+    <ul id="history" tabindex="0" aria-labelledby="historyTitle"></ul>
   </section>
 
   <!-- Avatar / Photo block -->
@@ -145,8 +146,12 @@
 
 <button id="backToTop" class="back-to-top" type="button" aria-label="Back to top">↑</button>
 
-<!-- Non-blocking notice when a refresh fails -->
-<div id="loadNotice" class="load-notice" role="status" hidden></div>
+<!-- Non-blocking notice when a refresh fails (a click or Escape dismisses it) -->
+<div id="loadNotice" class="load-notice" hidden></div>
+
+<!-- Screen reader announcements (search results, compare picks, refresh). Always in the page:
+     a live region that appears together with its text is often not read out. -->
+<div id="a11yStatus" class="visually-hidden" role="status"></div>
 
 <footer>
   <span>Created by @Sfg_m</span>

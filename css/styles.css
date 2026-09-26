@@ -69,6 +69,11 @@ body::before {
 }
 h1, h2, h3 { letter-spacing: -0.01em; }
 ::selection { background: var(--accent-soft); color: #fff; }
+/* Off screen but still read by screen readers (e.g. the role=status announcements) */
+.visually-hidden {
+  position: absolute !important; width: 1px; height: 1px; margin: -1px; padding: 0; border: 0;
+  overflow: hidden; clip-path: inset(50%); white-space: nowrap;
+}
 
 /* ========== Layout ========== */
 .container { max-width: 1180px; margin: 0 auto; padding: 0 16px; }
@@ -124,6 +129,8 @@ input[type="search"]:focus {
   background: var(--input-focus-bg);
   box-shadow: 0 0 0 3px rgba(53, 192, 122, 0.15);
 }
+/* The soft border and ring alone stay under 3:1; text fields match :focus-visible on click too */
+input[type="search"]:focus-visible { border-color: var(--accent); }
 
 /* ========== Card ========== */
 .card {
@@ -152,7 +159,8 @@ input[type="search"]:focus {
 }
 .btn:hover { background: var(--hover-bg); }
 .btn:active { transform: translateY(1px); }
-.btn:focus-visible { outline: none; border-color: var(--accent-border); box-shadow: 0 0 0 3px rgba(53, 192, 122, 0.18); }
+/* Accent outline, outside the button: reaches 3:1 on the page and on accent-filled buttons */
+.btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* ========== Table ========== */
 .tableWrap { overflow-x: auto; }
@@ -180,7 +188,9 @@ tbody td:nth-child(2) { width: 99%; white-space: nowrap; }
 tbody tr { cursor: pointer; transition: background var(--t) var(--ease); }
 tbody tr:hover { background: var(--soft-bg); }
 tbody tr.active { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
-tbody tr:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+/* The nickname is a button (js/app.js renderTable) that looks like plain text; its row shows the focus */
+.row-pick { all: unset; cursor: pointer; }
+tbody tr:has(.row-pick:focus-visible) { outline: 2px solid var(--accent); outline-offset: -2px; }
 .right { text-align: right; }
 .rank-1 { background: rgba(255, 215, 0, 0.10); }
 .rank-2 { background: rgba(180, 200, 230, 0.10); }
@@ -238,6 +248,7 @@ tbody tr:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px;
   border-color: var(--accent-border);
   box-shadow: 0 0 0 3px rgba(53,192,122,0.15);
 }
+.dateRange input[type="date"]:focus-visible { border-color: var(--accent); } /* 3:1, as the search field */
 .date-sep { opacity: 0.4; font-size: 13px; }
 
 /* ========== Chart ========== */
@@ -263,6 +274,7 @@ tbody tr:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px;
 
 /* ========== History ========== */
 #history { list-style: none; padding: 0; margin: 0; max-height: 320px; overflow-y: auto; }
+#history:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 #history li {
   display: flex; align-items: center;
   padding: 7px 0; border-bottom: 1px dashed var(--card-border);
@@ -343,7 +355,12 @@ tbody tr:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px;
   font-size: 11px; font-weight: 600; padding: 4px 9px; border-radius: 8px;
   pointer-events: none; opacity: 0; transition: opacity 150ms ease; z-index: 10;
 }
+/* Shown on hover and on keyboard focus; it never takes the pointer, so it cannot cover a click
+ * on the badge above it. */
 .ach-badge:hover .ach-badge-tip { opacity: 1; }
+.ach-badge:focus-visible .ach-badge-tip { opacity: 1; }
+.ach-badge.tip-dismissed .ach-badge-tip { opacity: 0; } /* Escape (js/app.js) */
+.ach-badge--link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 50%; }
 .ach-badge--link { text-decoration: none; cursor: pointer; }
 .ach-badge--link img { border-color: rgba(53, 210, 110, 0.7); box-shadow: 0 0 8px rgba(53, 210, 110, 0.25); }
 .ach-badge--link:hover img { border-color: rgba(53, 210, 110, 1); box-shadow: 0 0 16px rgba(53, 210, 110, 0.5); }
@@ -404,10 +421,11 @@ footer { padding: 14px 0 20px; text-align: center; opacity: 0.7; border-top: 1px
 .cmp-btn:hover { background: rgba(53,192,122,0.15); border-color: rgba(53,192,122,0.5); color: var(--accent); }
 .cmp-btn.selected { background: rgba(53,192,122,0.2); border-color: var(--accent); color: var(--accent); }
 .cmp-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-tr:not(:hover):not(:focus-visible) .cmp-btn:not(.selected):not(:focus-visible) { opacity: 0; }
+/* Keyboard focus on the row's nickname reveals it too; a mouse click (no :focus-visible) does not */
+tr:not(:hover):not(:has(:focus-visible)) .cmp-btn:not(.selected):not(:focus-visible) { opacity: 0; }
 /* Touch screens have no hover to reveal the "vs" button, whatever their width. */
 @media (hover: none) {
-  tr:not(:hover):not(:focus-visible) .cmp-btn:not(.selected):not(:focus-visible) { opacity: 0.7; }
+  tr:not(:hover):not(:has(:focus-visible)) .cmp-btn:not(.selected):not(:focus-visible) { opacity: 0.7; }
 }
 
 /* ========== Comparison Modal ========== */
@@ -552,7 +570,6 @@ body::after {
   /* Achievement names: laid out only while shown, so a badge near the edge never widens the page */
   .ach-badge-tip { display: none; width: max-content; max-width: min(220px, 70vw); white-space: normal; text-align: center; }
   .ach-badge:hover .ach-badge-tip, .ach-badge:focus-visible .ach-badge-tip { display: block; }
-  .ach-badge:focus-visible .ach-badge-tip { opacity: 1; } /* the base rule shows it on hover only */
 
   .back-to-top {
     right: calc(16px + env(safe-area-inset-right, 0px));
@@ -637,7 +654,7 @@ body::after {
   .compare-stat-val { font-size: 15px; }
 
   .mini-card { display: none !important; }
-  tr:not(:hover):not(:focus-visible) .cmp-btn:not(.selected):not(:focus-visible) { opacity: 0.7; }
+  tr:not(:hover):not(:has(:focus-visible)) .cmp-btn:not(.selected):not(:focus-visible) { opacity: 0.7; }
 }
 
 /* Small phones (< 480px) */

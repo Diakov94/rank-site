@@ -297,7 +297,7 @@ var panelEntered = false; // the panel was opened on this page (set by enterPane
 
 async function tryLogin() {
   if (loginPending) return;
-  loginError.style.display = "none";
+  loginError.textContent = "";
 
   var email    = emailInput ? emailInput.value.trim() : "";
   var password = passwordInput.value;
@@ -478,9 +478,10 @@ async function endSession() {
   }
 }
 
+/* #loginError is an alert region, and describes both fields, so the message is read out even
+ * though focus moves to the password. */
 function showLoginError(msg) {
   loginError.textContent = msg;
-  loginError.style.display = "block";
   passwordInput.value = "";
   passwordInput.focus();
 }
@@ -498,6 +499,7 @@ function enterPanel() {
   applyAccess();
   loginSection.style.display = "none";
   panelSection.style.display = "block";
+  panelSection.inert = true; // behind the loading overlay until loadAdminData is done
   switchTab(st.currentTab); // after a new login, reload the open tab for this account
   setTimeout(function() { toggleLoadingOverlay("adminLoadingOverlay", true); }, 0);
   loadAdminData();
@@ -615,10 +617,16 @@ async function loadAdminData() {
     renderLoadErrors();
     renderAchievementsTab();
     renderList();
+    /* The failed reads show in their tabs; screen readers hear them once, here. */
+    var failures = Object.values(st.loadErrors);
+    if (failures.length) announce(failures.join(" "));
   } catch (err) {
-    playerList.innerHTML = errorHtml("Failed to load data: " + err.message);
+    showLoadError(playerList, "Failed to load data: " + err.message);
   } finally {
     toggleLoadingOverlay("adminLoadingOverlay", false);
+    panelSection.inert = false;
+    /* Focus was on the login form, now hidden: the panel starts at its title. */
+    restoreFocus(document.querySelector(".admin-title"), loginSection);
   }
 }
 
@@ -641,6 +649,37 @@ function errorHtml(message) {
   return '<p class="load-error">' + escapeHtml(message) + '</p>';
 }
 
+/* Shows a failed load in `container` and reads it out (re-renders use errorHtml alone). */
+function showLoadError(container, message) {
+  container.innerHTML = errorHtml(message);
+  announce(message);
+}
+
+/* Reads `text` out to screen readers through the #adminStatus region. It is emptied first
+ * and filled a moment later, so the same text twice is read twice. */
+var announceTimer = 0;
+function announce(text) {
+  var region = document.getElementById("adminStatus");
+  if (!region) return;
+  clearTimeout(announceTimer);
+  region.textContent = "";
+  announceTimer = setTimeout(function() { region.textContent = text; }, 50);
+}
+
+/* Focuses `el` when focus was lost (the focused control was removed or hidden, so focus fell
+ * back to the page) or is still inside `scope`; never away from a control the user moved to. */
+function restoreFocus(el, scope) {
+  var active = document.activeElement;
+  if (el && (!active || active === document.body || (scope && scope.contains(active)))) el.focus();
+}
+
+/* After an item of `list` was deleted: focuses the first control of the item now at `index`
+ * (the next one, or the new last one), else `fallback`. */
+function focusAfterDelete(list, index, fallback) {
+  var item = list.children[Math.min(index, list.children.length - 1)];
+  restoreFocus((item && item.querySelector("button, input, select, [tabindex]")) || fallback);
+}
+
 /* A finite number as text, or "" — keeps database values out of markup. */
 function numOrEmpty(value) {
   var n = numberOrNaN(value);
@@ -660,7 +699,12 @@ function switchTab(tab) {
   TAB_IDS.forEach(function(key) {
     var btn = document.getElementById(tabDomId("tab", key));
     var sec = document.getElementById(tabDomId("section", key));
-    if (btn) btn.classList.toggle("tab-active", key === tab);
+    if (btn) {
+      btn.classList.toggle("tab-active", key === tab);
+      /* The open tab, for screen readers (the class only shows it) */
+      if (key === tab) btn.setAttribute("aria-current", "true");
+      else btn.removeAttribute("aria-current");
+    }
     if (sec) sec.style.display = key === tab ? "block" : "none";
   });
   /* On a narrow touch screen the tab row scrolls sideways (with a mouse it wraps instead, see
@@ -674,7 +718,11 @@ function switchTab(tab) {
     else if (tabBox.right > rowBox.right) tabRow.scrollLeft += tabBox.right - rowBox.right;
   }
   var load = TABS[tab].load;
-  if (load) load();
+  if (load) {
+    /* "Loading…" is only shown; say it too. The dashboard draws at once. */
+    if (load !== renderDashboard && activeTab) announce("Loading " + activeTab.textContent.replace(/^\S+\s+/, "") + "…");
+    load();
+  }
 }
 
 /* ===== Rating formula settings ===== */
@@ -688,7 +736,7 @@ async function loadFormulaSettings() {
   var btn = document.getElementById("saveFormulaBtn");
   if (btn) btn.disabled = true;
   var msg = document.getElementById("formulaMsg");
-  if (msg) { msg.style.display = "none"; msg.textContent = ""; }
+  if (msg) msg.textContent = ""; // an empty status region takes no room (admin.css)
   try {
     var rows = await adminRequest("/rest/v1/settings?select=key,value");
     var values = {};
@@ -743,7 +791,6 @@ function showFormulaMessage(message, error) {
   if (!el) return;
   el.textContent = message;
   el.style.color = error ? "#ff7676" : "var(--accent)";
-  el.style.display = "inline";
 }
 
 /* ===== Monthly Reset ===== */
@@ -827,11 +874,11 @@ async function loadResetPlayers() {
     if (seq !== resetLoadSeq) return; // a newer load replaced this one
 
     if (playersRes.status === "rejected") {
-      container.innerHTML = errorHtml("Could not load players: " + playersRes.reason.message);
+      showLoadError(container, "Could not load players: " + playersRes.reason.message);
       return;
     }
     if (existingRes.status === "rejected") {
-      container.innerHTML = errorHtml("Could not load the saved reset for " + dateVal + ": " + existingRes.reason.message +
+      showLoadError(container, "Could not load the saved reset for " + dateVal + ": " + existingRes.reason.message +
         ". Saving is disabled so the saved values are not overwritten.");
       return;
     }
@@ -880,8 +927,9 @@ async function loadResetPlayers() {
         '</div>' +
         '<div class="row-actions" style="gap:8px;">' +
           (savedRating != null ? '<span style="font-size:11px;color:var(--accent);opacity:0.8;">saved</span>' : '') +
-          '<label style="font-size:12px;opacity:0.5;white-space:nowrap;">Start rating</label>' +
-          '<input type="number" class="reset-rating-input group-min-input" value="' + numOrEmpty(displayRating) + '" min="0" step="0.5" style="width:90px;text-align:right;" />' +
+          '<span aria-hidden="true" style="font-size:12px;opacity:0.5;white-space:nowrap;">Start rating</span>' +
+          '<input type="number" class="reset-rating-input group-min-input" value="' + numOrEmpty(displayRating) + '" min="0" step="0.5" style="width:90px;text-align:right;" ' +
+            'aria-label="Start rating for ' + escapeHtml(p.nickname) + '" />' +
         '</div>';
 
       setAvatar(row.querySelector(".player-row-avatar"), p.nickname, 64, avatarSrc(p.nickname));
@@ -891,7 +939,7 @@ async function loadResetPlayers() {
     container.dataset.resetDate = dateVal;
     updateResetSaveBtn();
   } catch (e) {
-    container.innerHTML = errorHtml("Error: " + e.message);
+    showLoadError(container, "Error: " + e.message);
   }
 }
 
@@ -954,7 +1002,7 @@ async function saveMonthlyReset() {
     }
 
     var msg = document.getElementById("resetMsg");
-    if (msg) { msg.style.display = "inline"; setTimeout(function() { msg.style.display = "none"; }, 2500); }
+    if (msg) { msg.textContent = "✓ Saved!"; setTimeout(function() { msg.textContent = ""; }, 2500); }
 
     // Reload to show "saved" badges
     await loadResetPlayers();
@@ -1009,7 +1057,7 @@ async function loadAdjustmentsTab() {
     );
     renderAdjustmentsList(Array.isArray(rows) ? rows : []);
   } catch (e) {
-    container.innerHTML = errorHtml("Could not load adjustments: " + e.message);
+    showLoadError(container, "Could not load adjustments: " + e.message);
   }
 }
 
@@ -1042,7 +1090,8 @@ function renderAdjustmentsList(rows) {
         '<td style="padding:6px 8px;font-variant-numeric:tabular-nums;">' + escapeHtml(adjustmentEffectText(r)) + '</td>' +
         '<td style="padding:6px 8px;opacity:0.6;">' + escapeHtml(r.reason || "—") + '</td>' +
         '<td style="padding:6px 8px;">' +
-          '<button class="btn adj-del-btn" data-id="' + escapeHtml(r.id) + '" type="button" ' +
+          '<button class="btn adj-del-btn" data-id="' + escapeHtml(r.id) + '" type="button" title="Delete adjustment" ' +
+          'aria-label="Delete adjustment for ' + escapeHtml(r.nickname) + ' on ' + escapeHtml(r.applied_date) + '" ' +
           'style="font-size:11px;color:#ff7676;padding:3px 8px;">✕</button>' +
         '</td></tr>';
     }).join("") +
@@ -1101,7 +1150,7 @@ async function loadGroupsTab() {
     var rows = await adminRequest("/rest/v1/rating_groups?select=id,name,min_rating,color,coef&order=min_rating.desc");
     renderGroupsTab(normalizeGroups(rows));
   } catch (e) {
-    container.innerHTML = errorHtml("Could not load groups: " + e.message);
+    showLoadError(container, "Could not load groups: " + e.message);
   }
 }
 
@@ -1121,17 +1170,18 @@ function renderGroupsTab(groups) {
   groups.forEach(function(g) {
     var row = document.createElement("div");
     row.className = "group-row";
+    /* Every row has the same fields: their names say which group they belong to. */
     row.innerHTML =
       '<label class="group-color-wrap" title="Click to change colour">' +
         '<span class="group-color-swatch" style="background:' + escapeHtml(g.color) + ';"></span>' +
-        '<input class="group-color-input" type="color" value="' + escapeHtml(g.color) + '" />' +
+        '<input class="group-color-input" type="color" value="' + escapeHtml(g.color) + '" aria-label="Colour of ' + escapeHtml(g.name) + '" />' +
       '</label>' +
-      '<input class="group-name-input" type="text" value="' + escapeHtml(g.name) + '" placeholder="Group name" />' +
-      '<span class="group-min-label">Min rating:</span>' +
-      '<input class="group-min-input" type="number" value="' + escapeHtml(g.min) + '" min="0" step="1" />' +
-      '<span class="group-min-label">Coef:</span>' +
-      '<input class="group-min-input group-coef-input" type="number" value="' + escapeHtml(g.coef) + '" step="0.01" />' +
-      '<button class="btn group-save-btn" type="button" style="font-size:13px;background:var(--accent);color:#0b0f14;font-weight:700;flex-shrink:0;">Save</button>';
+      '<input class="group-name-input" type="text" value="' + escapeHtml(g.name) + '" placeholder="Group name" aria-label="Name of group ' + escapeHtml(g.name) + '" />' +
+      '<label class="group-min-label" for="grpMin' + escapeHtml(g.id) + '">Min rating:</label>' +
+      '<input id="grpMin' + escapeHtml(g.id) + '" class="group-min-input" type="number" value="' + escapeHtml(g.min) + '" min="0" step="1" />' +
+      '<label class="group-min-label" for="grpCoef' + escapeHtml(g.id) + '">Coef:</label>' +
+      '<input id="grpCoef' + escapeHtml(g.id) + '" class="group-min-input group-coef-input" type="number" value="' + escapeHtml(g.coef) + '" step="0.01" />' +
+      '<button class="btn group-save-btn" type="button" aria-label="Save ' + escapeHtml(g.name) + '" style="font-size:13px;background:var(--accent);color:#0b0f14;font-weight:700;flex-shrink:0;">Save</button>';
 
     // Live-update swatch as colour changes
     row.querySelector(".group-color-input").addEventListener("input", function(e) {
@@ -1174,6 +1224,10 @@ async function saveGroup(groupObj, name, minRating, color, coef, rowEl, entries)
     rowEl.querySelector(".group-coef-input").value = groupObj.coef;
     rowEl.querySelector(".group-color-input").value = groupObj.color;
     rowEl.querySelector(".group-color-swatch").style.background = groupObj.color;
+    /* The field names carry the group's name, which may have changed */
+    rowEl.querySelector(".group-color-input").setAttribute("aria-label", "Colour of " + groupObj.name);
+    rowEl.querySelector(".group-name-input").setAttribute("aria-label", "Name of group " + groupObj.name);
+    saveBtn.setAttribute("aria-label", "Save " + groupObj.name);
 
     entries.sort(function(a, b) { return b.group.min - a.group.min; });
     var container = rowEl.parentNode;
@@ -1184,6 +1238,7 @@ async function saveGroup(groupObj, name, minRating, color, coef, rowEl, entries)
 
     writeLog("Group updated", groupObj.name + " — min:" + groupObj.min + " color:" + groupObj.color);
     saveBtn.textContent = "✓ Saved";
+    announce(groupObj.name + " saved."); // the button text alone is not read out
     setTimeout(function() {
       saveBtn.disabled = false;
       saveBtn.textContent = "Save";
@@ -1236,17 +1291,19 @@ function makeAchCard(ach) {
     '</div>' +
     '<div class="ach-card-edit" style="display:none;">' +
       '<div class="ach-edit-row">' +
-        '<label class="ach-edit-label">Name</label>' +
-        '<input class="ach-edit-name ach-edit-input" type="text" value="' + escapeHtml(ach.name) + '" />' +
+        '<label class="ach-edit-label" for="achEditName' + escapeHtml(ach.id) + '">Name</label>' +
+        '<input id="achEditName' + escapeHtml(ach.id) + '" class="ach-edit-name ach-edit-input" type="text" value="' + escapeHtml(ach.name) + '" />' +
       '</div>' +
       '<div class="ach-edit-row">' +
-        '<label class="ach-edit-label">Link (URL)</label>' +
-        '<input class="ach-edit-url ach-edit-input" type="url" placeholder="https://..." value="' + escapeHtml(ach.url || "") + '" />' +
+        '<label class="ach-edit-label" for="achEditUrl' + escapeHtml(ach.id) + '">Link (URL)</label>' +
+        '<input id="achEditUrl' + escapeHtml(ach.id) + '" class="ach-edit-url ach-edit-input" type="url" placeholder="https://..." value="' + escapeHtml(ach.url || "") + '" />' +
       '</div>' +
       '<div class="ach-edit-row">' +
         '<label class="ach-edit-label">Icon</label>' +
         '<div style="display:flex;align-items:center;gap:8px;">' +
-          '<label class="upload-btn" title="Choose new icon">🖼<input class="ach-edit-file" type="file" accept="image/*" style="display:none" /></label>' +
+          /* Visually hidden, not display:none, so the keyboard can reach it */
+          '<label class="upload-btn" title="Choose new icon"><span aria-hidden="true">🖼</span>' +
+            '<input class="ach-edit-file sr-only" type="file" accept="image/*" aria-label="New icon for ' + escapeHtml(ach.name) + '" /></label>' +
           '<span class="ach-edit-filename" style="font-size:12px;opacity:0.55;">Keep current</span>' +
         '</div>' +
       '</div>' +
@@ -1263,16 +1320,18 @@ function makeAchCard(ach) {
     return card;
   }
 
-  /* Edit toggle */
+  /* Edit toggle. Each hides the button just pressed, so focus moves to the part now shown. */
   card.querySelector(".ach-edit-btn").addEventListener("click", function() {
     card.querySelector(".ach-card-view").style.display = "none";
     card.querySelector(".ach-card-edit").style.display = "flex";
+    card.querySelector(".ach-edit-name").focus();
   });
   card.querySelector(".ach-cancel-edit-btn").addEventListener("click", function() {
     card.querySelector(".ach-card-view").style.display = "flex";
     card.querySelector(".ach-card-edit").style.display = "none";
     card.querySelector(".ach-edit-file").value = "";
     card.querySelector(".ach-edit-filename").textContent = "Keep current";
+    card.querySelector(".ach-edit-btn").focus();
   });
 
   /* File picker label */
@@ -1338,7 +1397,11 @@ async function createAchievement(name, url, file) {
     document.getElementById("achUrlInput").value = "";
     document.getElementById("achIconInput").value = "";
     document.getElementById("achIconName").textContent = "No file";
-    document.getElementById("addAchForm").classList.remove("open");
+    var addAchForm = document.getElementById("addAchForm");
+    addAchForm.classList.remove("open");
+    var addAchBtn = document.getElementById("addAchBtn");
+    addAchBtn.setAttribute("aria-expanded", "false");
+    restoreFocus(addAchBtn, addAchForm); // the form closed around the Save button
 
     renderAchievementsTab();
   } catch (err) {
@@ -1371,6 +1434,8 @@ async function saveAchievementEdit(id, name, url, file, cardEl) {
     writeLog("Achievement edited", name);
 
     renderAchievementsTab();
+    /* The card was drawn again: focus goes back to its Edit button. */
+    restoreFocus(document.querySelector('#achCardList [data-ach-id="' + CSS.escape(String(id)) + '"] .ach-edit-btn'));
   } catch (err) {
     alert(refusalText(err, "edit achievements") || "Error: " + err.message);
     saveBtn.disabled = false; saveBtn.textContent = "Save";
@@ -1384,11 +1449,14 @@ async function deleteAchievement(id, cardEl) {
     await adminRequest("/rest/v1/achievements?id=eq." + encodeURIComponent(id), { method: "DELETE", mustMatch: true });
     var delName = (st.achievements.find(function(a){return a.id===id;})||{}).name || String(id);
     writeLog("Achievement deleted", delName);
+    var list = document.getElementById("achCardList");
+    var index = cardEl ? Array.prototype.indexOf.call(list.children, cardEl) : 0;
     st.achievements = st.achievements.filter(function(a) { return a.id !== id; });
     Object.keys(st.playerAchievements).forEach(function(nick) {
       st.playerAchievements[nick].delete(id);
     });
     renderAchievementsTab();
+    focusAfterDelete(list, index, document.querySelector("#sectionAchievements h2"));
     renderList();
   } catch (err) {
     if (cardEl) cardEl.style.opacity = "1";
@@ -1408,6 +1476,8 @@ function openAchievementPicker(nick, btnEl) {
   var picker = document.createElement("div");
   picker.className = "ach-picker";
   picker.id = "achPicker";
+  picker.setAttribute("role", "group");
+  picker.setAttribute("aria-label", "Achievements of " + nick);
   var assigned = st.playerAchievements[nick] || new Set();
   st.achievements.forEach(function(ach) {
     var isChecked = assigned.has(ach.id);
@@ -1426,8 +1496,19 @@ function openAchievementPicker(nick, btnEl) {
   picker.style.position = "fixed";
   picker.style.top = (rect.bottom + 6) + "px";
   picker.style.right = (window.innerWidth - rect.right) + "px";
-  document.body.appendChild(picker);
+  /* Right after the player's row, so its checkboxes come next in the Tab and reading order.
+   * It is position:fixed, so the list's layout does not change. */
+  btnEl.closest(".player-row").after(picker);
+  btnEl.setAttribute("aria-expanded", "true");
   keepPickerOnScreen(picker, rect);
+  picker.querySelector("input").focus({ preventScroll: true });
+  /* Escape closes it (back to the button), and so does moving focus out of it. */
+  picker.addEventListener("keydown", function(e) {
+    if (e.key === "Escape") { closeAchievementPicker(); btnEl.focus(); }
+  });
+  picker.addEventListener("focusout", function(e) {
+    if (e.relatedTarget && !picker.contains(e.relatedTarget) && e.relatedTarget !== btnEl) closeAchievementPicker();
+  });
   setTimeout(function() {
     document.addEventListener("click", onPickerOutsideClick, true);
   }, 0);
@@ -1480,6 +1561,8 @@ function onPickerOutsideClick(e) {
 function closeAchievementPicker() {
   var picker = document.getElementById("achPicker");
   if (picker) picker.remove();
+  var btn = st.openPickerNick !== null ? trophyBtnOf(st.openPickerNick) : null;
+  if (btn) btn.setAttribute("aria-expanded", "false");
   st.openPickerNick = null;
 }
 
@@ -1518,12 +1601,18 @@ function paintTrophy(btn, nick) {
   var count = st.playerAchievements[nick] ? st.playerAchievements[nick].size : 0;
   btn.classList.toggle("has-ach", count > 0);
   btn.title = count > 0 ? "Achievements (" + count + ")" : "Add achievement";
+  /* The title is only a description; the name says whose badges the button opens. */
+  btn.setAttribute("aria-label", count > 0 ? "Achievements of " + nick + " (" + count + ")" : "Add achievement to " + nick);
+}
+
+/* The trophy button in `nick`'s row of the player list, or null. */
+function trophyBtnOf(nick) {
+  var row = playerList.querySelector('[data-nick="' + CSS.escape(nick) + '"]');
+  return row && row.querySelector(".trophy-btn");
 }
 
 function updateTrophyBtn(nick) {
-  var row = playerList.querySelector('[data-nick="' + CSS.escape(nick) + '"]');
-  if (!row) return;
-  var btn = row.querySelector(".trophy-btn");
+  var btn = trophyBtnOf(nick);
   if (btn) paintTrophy(btn, nick);
 }
 
@@ -1575,17 +1664,26 @@ function makeRow(p) {
         '<div class="player-row-rating">Rating: ' + escapeHtml(rating) + '</div>' +
       '</div>' +
     '</div>' +
+    /* The file input is visually hidden, not display:none, so the keyboard reaches it. The
+     * switch is named "Show <nick> on site: Visible/Hidden": its label text alone is the state. */
     '<div class="row-actions">' +
-      (canUpload ? '<label class="upload-btn" title="Upload photo">📷<input class="avatar-file-input" type="file" accept="image/*" style="display:none" /></label>' : '') +
-      (canBadges ? '<button class="trophy-btn" type="button">🏆</button>' : '') +
+      (canUpload
+        ? '<label class="upload-btn" title="Upload photo"><span aria-hidden="true">📷</span>' +
+            '<input class="avatar-file-input sr-only" type="file" accept="image/*" aria-label="Upload photo for ' + escapeHtml(p.nick) + '" /></label>'
+        : '') +
+      (canBadges ? '<button class="trophy-btn" type="button" aria-expanded="false"><span aria-hidden="true">🏆</span></button>' : '') +
       (canVisibility
         ? '<label class="toggle">' +
-            '<input type="checkbox" />' +
+            '<span class="sr-only">Show ' + escapeHtml(p.nick) + ' on site: </span>' +
+            '<input type="checkbox" role="switch" />' +
             '<span class="toggle-track"><span class="toggle-thumb"></span></span>' +
             '<span class="toggle-label"></span>' +
           '</label>'
         : visible ? '' : '<span class="row-status">Hidden</span>') +
-      (canDelete ? '<button class="btn delete-player-btn" type="button" title="Delete player" style="font-size:11px;color:#ff7676;padding:3px 8px;">✕</button>' : '') +
+      (canDelete
+        ? '<button class="btn delete-player-btn" type="button" title="Delete player" aria-label="Delete player ' + escapeHtml(p.nick) + '" ' +
+            'style="font-size:11px;color:#ff7676;padding:3px 8px;">✕</button>'
+        : '') +
     '</div>';
   paintVisibility(row, visible);
 
@@ -1714,7 +1812,8 @@ async function loadLog() {
       logList.innerHTML = '<p class="loading-msg">No log entries yet.</p>';
       return;
     }
-    var html = '<div class="log-wrap"><table class="log-table"><thead><tr><th>Time</th><th>Who</th><th>Action</th><th>Details</th></tr></thead><tbody>';
+    /* Focusable, so the keyboard can scroll it sideways where it overflows (under 1100px). */
+    var html = '<div class="log-wrap" tabindex="0" role="region" aria-label="Activity log"><table class="log-table"><thead><tr><th>Time</th><th>Who</th><th>Action</th><th>Details</th></tr></thead><tbody>';
     rows.forEach(function(r) {
       var timeStr = formatStamp(r.created_at, "—");
       html += '<tr>' +
@@ -1727,7 +1826,7 @@ async function loadLog() {
     html += '</tbody></table></div>';
     logList.innerHTML = html;
   } catch (e) {
-    logList.innerHTML = errorHtml("Failed to load log: " + e.message);
+    showLoadError(logList, "Failed to load log: " + e.message);
   }
 }
 
@@ -1867,9 +1966,9 @@ function renderDashboard() {
       '<div class="dash-card"><div class="dash-card-val">' + totalBadges + '</div><div class="dash-card-label">Badges assigned</div></div>' +
     '</div>' +
 
-    '<p class="dash-h3">📈 Top gainers (7 days)</p>' + moverHtml(gainers, true) +
-    '<p class="dash-h3">📉 Top losers (7 days)</p>'  + moverHtml(losers, false) +
-    '<p class="dash-h3">🎮 Group distribution</p>' +
+    '<h3 class="dash-h3">📈 Top gainers (7 days)</h3>' + moverHtml(gainers, true) +
+    '<h3 class="dash-h3">📉 Top losers (7 days)</h3>'  + moverHtml(losers, false) +
+    '<h3 class="dash-h3">🎮 Group distribution</h3>' +
     '<div>' +
     groupDist.map(function(g) {
       var pct = visible > 0 ? Math.round(g.count / visible * 100) : 0;
@@ -1882,7 +1981,7 @@ function renderDashboard() {
     }).join("") +
     '</div>' +
 
-    '<p class="dash-h3">📅 Activity by month</p>' +
+    '<h3 class="dash-h3">📅 Activity by month</h3>' +
     '<div class="dash-grid" style="margin-bottom:14px;">' +
       '<div class="dash-card"><div class="dash-card-val" style="color:#52d18a">' + gameDates.size + '</div><div class="dash-card-label">Game days (' + escapeHtml(monthName.split(' ')[0]) + ')</div></div>' +
       '<div class="dash-card"><div class="dash-card-val" style="color:#52d18a">' + activeCnt + '</div><div class="dash-card-label">Players played</div></div>' +
@@ -1895,6 +1994,7 @@ function renderDashboard() {
     btn.addEventListener('click', function() {
       var target = document.getElementById(btn.dataset.target);
       var open = btn.classList.toggle('open');
+      btn.setAttribute('aria-expanded', String(open));
       if (target) target.classList.toggle('open', open);
     });
   });
@@ -1935,9 +2035,10 @@ function buildActivityHtml(sortedMonths) {
       var players = calcMonthActivity(prefix);
       return '<div class="month-section" style="margin-left:0;">' +
         '<div class="month-toggle-row">' +
-          '<button class="month-toggle' + (isMonthOpen ? ' open' : '') + '" data-target="mgrid-' + escapeHtml(prefix) + '">' +
+          '<button class="month-toggle' + (isMonthOpen ? ' open' : '') + '" data-target="mgrid-' + escapeHtml(prefix) + '" ' +
+            'aria-expanded="' + isMonthOpen + '" aria-controls="mgrid-' + escapeHtml(prefix) + '">' +
             escapeHtml(label) +
-            '<span class="month-arrow">▼</span>' +
+            '<span class="month-arrow" aria-hidden="true">▼</span>' +
           '</button>' +
           '<button class="act-csv-btn btn" data-prefix="' + escapeHtml(prefix) + '" data-label="' + escapeHtml(label + ' ' + year) + '" style="font-size:12px;padding:5px 10px;flex-shrink:0;">📥 CSV</button>' +
         '</div>' +
@@ -1948,9 +2049,10 @@ function buildActivityHtml(sortedMonths) {
     }).join('');
 
     return '<div class="year-section">' +
-      '<button class="year-toggle' + (isYearOpen ? ' open' : '') + '" data-target="ygrid-' + escapeHtml(year) + '">' +
+      '<button class="year-toggle' + (isYearOpen ? ' open' : '') + '" data-target="ygrid-' + escapeHtml(year) + '" ' +
+        'aria-expanded="' + isYearOpen + '" aria-controls="ygrid-' + escapeHtml(year) + '">' +
         '📆 ' + escapeHtml(year) +
-        '<span class="month-arrow">▼</span>' +
+        '<span class="month-arrow" aria-hidden="true">▼</span>' +
       '</button>' +
       '<div class="year-body' + (isYearOpen ? ' open' : '') + '" id="ygrid-' + escapeHtml(year) + '">' +
         monthsHtml +
@@ -2069,15 +2171,14 @@ function makeOption(value, text, selected) {
 }
 
 /* Shows `text` in a form's message span: red for an error, green otherwise (cleared after a
- * few seconds). */
+ * few seconds). The span is a status region that stays in the page; empty, it takes no room. */
 function showFormMessage(id, text, isError) {
   var el = document.getElementById(id);
   if (!el) return;
   clearTimeout(el._hideTimer);
   el.textContent = text;
   el.style.color = isError ? "#ff7676" : "var(--accent)";
-  el.hidden = false;
-  if (!isError) el._hideTimer = setTimeout(function() { el.hidden = true; }, 4000);
+  if (!isError) el._hideTimer = setTimeout(function() { el.textContent = ""; }, 4000);
 }
 
 /* ===== Users tab =====
@@ -2152,7 +2253,7 @@ async function loadUsersTab() {
   } catch (e) {
     if (seq !== usersLoadSeq) return;
     console.error("Users load failed:", e);
-    list.innerHTML = errorHtml("Could not load users: " + errorText(e, "manage users"));
+    showLoadError(list, "Could not load users: " + errorText(e, "manage users"));
     fillNewUserRoleSelect("Not available");
   }
 }
@@ -2210,16 +2311,19 @@ function makeUserRow(user) {
     '<div class="user-row-actions">' +
       (manageable
         ? '<select class="admin-input admin-input--role user-role-select"></select>' +
-          '<button class="btn user-pw-btn" type="button" style="font-size:12px;">🔑 Set password</button>' +
-          '<button class="btn user-del-btn" type="button" title="Delete user" style="font-size:11px;color:#ff7676;padding:3px 8px;">✕</button>'
-        : '<span class="user-role-static">' + escapeHtml(roleText) + '</span>') +
+          '<button class="btn btn-accent user-role-save" type="button" hidden>Save role</button>' +
+          '<button class="btn user-pw-btn" type="button" aria-expanded="false" style="font-size:12px;">🔑 Set password</button>' +
+          '<button class="btn user-del-btn" type="button" title="Delete user" aria-label="Delete user ' + escapeHtml(user.email || user.id) + '" ' +
+            'style="font-size:11px;color:#ff7676;padding:3px 8px;">✕</button>'
+        // tabindex=-1: script moves focus here after a redraw or a delete (no control in the row)
+        : '<span class="user-role-static" tabindex="-1">' + escapeHtml(roleText) + '</span>') +
     '</div>' +
     (manageable
       ? '<div class="user-pw-form" hidden>' +
           '<input class="admin-input user-pw-input" type="password" autocomplete="new-password" placeholder="New password (at least ' + MIN_PASSWORD_LENGTH + ' characters)" />' +
           '<button class="btn btn-accent user-pw-save" type="button">Save password</button>' +
           '<button class="btn user-pw-cancel" type="button" style="font-size:13px;">Cancel</button>' +
-          '<span class="form-msg user-pw-msg" hidden></span>' +
+          '<span class="form-msg user-pw-msg" role="status"></span>' +
         '</div>'
       : '');
 
@@ -2237,19 +2341,37 @@ function makeUserRow(user) {
     select.appendChild(makeOption(String(r.id), r.name, r.id === user.role_id));
   });
   if (user.role_id !== null) select.appendChild(makeOption("", "No role (remove access)", false));
-  select.addEventListener("change", function() { changeUserRole(user, row, select); });
+  /* A role picked with the mouse or a finger is saved at once. Arrow keys change a closed
+   * select one role per press (Windows), which would grant every role on the way, so a role
+   * picked from the keyboard waits for Enter or the Save role button. */
+  var roleSave = row.querySelector(".user-role-save");
+  var keyboardPick = false;
+  select.addEventListener("pointerdown", function() { keyboardPick = false; });
+  select.addEventListener("keydown", function(e) {
+    if (e.key === "Enter") changeUserRole(user, row, select);
+    else keyboardPick = true;
+  });
+  select.addEventListener("change", function() {
+    roleSave.hidden = !keyboardPick || toRoleId(select.value) === user.role_id;
+    if (!keyboardPick) changeUserRole(user, row, select);
+  });
+  roleSave.addEventListener("click", function() { changeUserRole(user, row, select); });
 
   var pwForm = row.querySelector(".user-pw-form");
   var pwInput = row.querySelector(".user-pw-input");
+  var pwBtn = row.querySelector(".user-pw-btn");
   pwInput.setAttribute("aria-label", "New password for " + (user.email || user.id));
-  row.querySelector(".user-pw-btn").addEventListener("click", function() {
+  pwBtn.addEventListener("click", function() {
     pwForm.hidden = !pwForm.hidden;
+    pwBtn.setAttribute("aria-expanded", String(!pwForm.hidden));
     if (!pwForm.hidden) pwInput.focus();
   });
   row.querySelector(".user-pw-cancel").addEventListener("click", function() {
     pwInput.value = "";
-    row.querySelector(".user-pw-msg").hidden = true;
+    row.querySelector(".user-pw-msg").textContent = "";
     pwForm.hidden = true;
+    pwBtn.setAttribute("aria-expanded", "false");
+    pwBtn.focus(); // the form closed around this Cancel button
   });
   row.querySelector(".user-pw-save").addEventListener("click", function() { setUserPassword(user, row); });
   pwInput.addEventListener("keydown", function(e) { if (e.key === "Enter") setUserPassword(user, row); });
@@ -2263,11 +2385,14 @@ async function changeUserRole(user, row, select) {
   var before = user.role_id;
   if (newId === before) return;
   var who = user.email || user.id;
+  var roleSave = row.querySelector(".user-role-save");
   if (newId === null && !confirm('Remove the role of "' + who + '"? They will no longer be able to use the admin panel.')) {
     select.value = String(before);
+    roleSave.hidden = true;
     return;
   }
   select.disabled = true;
+  roleSave.disabled = true;
   try {
     if (newId === null) {
       await adminRequest("/rest/v1/user_roles?user_id=eq." + encodeURIComponent(user.id), { method: "DELETE", mustMatch: true });
@@ -2280,10 +2405,14 @@ async function changeUserRole(user, row, select) {
     }
     user.role_id = newId;
     writeLog("Role changed", who + ": " + roleNameOf(before) + " → " + roleNameOf(newId));
-    row.replaceWith(makeUserRow(user)); // the "No role" options depend on the role
+    var newRow = makeUserRow(user);
+    row.replaceWith(newRow); // the "No role" options depend on the role
+    restoreFocus(newRow.querySelector(".user-role-select, .user-role-static")); // the focused select went with the old row
   } catch (e) {
     select.value = before === null ? "" : String(before);
     select.disabled = false;
+    roleSave.disabled = false;
+    roleSave.hidden = true;
     alert(errorText(e, newId === null ? "remove this user's role" : "give this user that role"));
   }
 }
@@ -2293,14 +2422,14 @@ async function setUserPassword(user, row) {
   var save = row.querySelector(".user-pw-save");
   var msg = row.querySelector(".user-pw-msg");
   var password = input.value;
-  function show(text) { msg.textContent = text; msg.style.color = "#ff7676"; msg.hidden = false; }
+  function show(text) { msg.textContent = text; msg.style.color = "#ff7676"; }
   if (save.disabled) return;
   if (password.length < MIN_PASSWORD_LENGTH) {
     show("Password must be at least " + MIN_PASSWORD_LENGTH + " characters.");
     input.focus();
     return;
   }
-  msg.hidden = true;
+  msg.textContent = "";
   save.disabled = true;
   save.textContent = "Saving…";
   try {
@@ -2310,6 +2439,9 @@ async function setUserPassword(user, row) {
     row.querySelector(".user-pw-form").hidden = true;
     var pwBtn = row.querySelector(".user-pw-btn");
     pwBtn.textContent = "✓ Password set";
+    pwBtn.setAttribute("aria-expanded", "false");
+    restoreFocus(pwBtn, row); // the form closed around the focused field or button
+    announce("Password set for " + (user.email || user.id) + "."); // the button text alone is not read out
     setTimeout(function() { pwBtn.textContent = "🔑 Set password"; }, 2500);
   } catch (e) {
     show(errorText(e, "set this user's password"));
@@ -2328,8 +2460,11 @@ async function deleteUser(user, row) {
   try {
     await callAdminUsers({ action: "delete", user_id: user.id });
     writeLog("User deleted", who + " (" + roleNameOf(user.role_id) + ")");
+    var list = document.getElementById("userList");
+    var index = Array.prototype.indexOf.call(list.children, row);
     st.users = st.users.filter(function(u) { return u.id !== user.id; });
     renderUsers();
+    focusAfterDelete(list, index, document.querySelector("#sectionUsers h2"));
   } catch (e) {
     row.style.opacity = "1";
     btn.disabled = false;
@@ -2403,7 +2538,7 @@ async function loadRolesTab() {
   } catch (e) {
     if (seq !== rolesLoadSeq) return;
     console.error("Roles load failed:", e);
-    list.innerHTML = errorHtml("Could not load roles: " + errorText(e, "manage roles"));
+    showLoadError(list, "Could not load roles: " + errorText(e, "manage roles"));
   }
 }
 
@@ -2439,7 +2574,7 @@ function makeRoleCard(role) {
       '</div>' +
       (role.is_super ? '' :
         '<div class="role-card-actions">' +
-          '<button class="btn role-edit-btn" type="button" style="font-size:12px;">✏ Edit</button>' +
+          '<button class="btn role-edit-btn" type="button" aria-expanded="false" style="font-size:12px;">✏ Edit</button>' +
           '<button class="btn role-del-btn" type="button" style="font-size:12px;color:#ff7676;">✕ Delete</button>' +
         '</div>') +
     '</div>' +
@@ -2459,6 +2594,9 @@ function makeRoleCard(role) {
   if (role.is_super) return card;
 
   var perms = card.querySelector(".role-perms");
+  /* Every card lists the same checkboxes: the group's name says which role they change. */
+  perms.setAttribute("role", "group");
+  perms.setAttribute("aria-label", "Permissions of " + role.name);
   st.roleData.permissions.forEach(function(perm) {
     var label = document.createElement("label");
     label.className = "role-perm";
@@ -2469,6 +2607,16 @@ function makeRoleCard(role) {
     var text = document.createElement("span");
     text.textContent = perm.label;
     label.append(box, text);
+    /* The title is not read for the checkbox: screen readers get the description from a
+     * hidden copy (hidden, so it is not also read as part of the name). */
+    if (perm.description) {
+      var desc = document.createElement("span");
+      desc.id = "perm-" + role.id + "-" + perm.key.replace(/[^\w-]/g, "_");
+      desc.hidden = true;
+      desc.textContent = perm.description;
+      label.append(desc);
+      box.setAttribute("aria-describedby", desc.id);
+    }
     box.addEventListener("change", function() { toggleRolePermission(role, perm, box); });
     perms.appendChild(label);
   });
@@ -2476,14 +2624,18 @@ function makeRoleCard(role) {
   var edit = card.querySelector(".role-card-edit");
   var nameInput = card.querySelector(".role-edit-name");
   var descInput = card.querySelector(".role-edit-desc");
-  card.querySelector(".role-edit-btn").addEventListener("click", function() {
+  var editBtn = card.querySelector(".role-edit-btn");
+  editBtn.addEventListener("click", function() {
     edit.hidden = !edit.hidden;
+    editBtn.setAttribute("aria-expanded", String(!edit.hidden));
     if (!edit.hidden) nameInput.focus();
   });
   card.querySelector(".role-cancel-btn").addEventListener("click", function() {
     nameInput.value = role.name;
     descInput.value = role.description;
     edit.hidden = true;
+    editBtn.setAttribute("aria-expanded", "false");
+    editBtn.focus(); // the form closed around this Cancel button
   });
   card.querySelector(".role-save-btn").addEventListener("click", function() { saveRole(role, card); });
   [nameInput, descInput].forEach(function(input) {
@@ -2529,6 +2681,9 @@ async function saveRole(role, card) {
   if (!name) { alert("Enter a role name."); return; }
   if (name === role.name && description === role.description) {
     card.querySelector(".role-card-edit").hidden = true;
+    var editBtn = card.querySelector(".role-edit-btn");
+    editBtn.setAttribute("aria-expanded", "false");
+    editBtn.focus(); // the form closed around the focused field or button
     return;
   }
   btn.disabled = true;
@@ -2548,6 +2703,8 @@ async function saveRole(role, card) {
     writeLog("Role updated", role.name + ": " + (changes.join(", ") || "saved"));
     st.roleData.roles.sort(compareRoles);
     renderRoles();
+    /* The card was drawn again: focus goes back to its Edit button. */
+    restoreFocus(document.querySelector('#roleList [data-role-id="' + CSS.escape(String(role.id)) + '"] .role-edit-btn'));
   } catch (e) {
     alert(errorText(e, "edit roles", "A role with this name already exists."));
     btn.disabled = false;
@@ -2561,10 +2718,13 @@ async function deleteRole(role, card) {
   try {
     await adminRequest("/rest/v1/roles?id=eq." + encodeURIComponent(role.id), { method: "DELETE", mustMatch: true });
     writeLog("Role deleted", role.name);
+    var list = document.getElementById("roleList");
+    var index = Array.prototype.indexOf.call(list.children, card);
     /* By id: st.roleData may have been loaded again since this card was drawn. */
     st.roleData.roles = st.roleData.roles.filter(function(r) { return r.id !== role.id; });
     st.roleData.byId.delete(role.id);
     renderRoles();
+    focusAfterDelete(list, index, document.querySelector("#sectionRoles h2"));
   } catch (e) {
     card.style.opacity = "1";
     alert(errorText(e, "delete roles", "Role is still assigned to users."));
@@ -2648,13 +2808,15 @@ document.addEventListener("DOMContentLoaded", function() {
   var achIconName  = document.getElementById("achIconName");
 
   if (addAchBtn) addAchBtn.addEventListener("click", function() {
-    addAchForm.classList.toggle("open");
+    addAchBtn.setAttribute("aria-expanded", String(addAchForm.classList.toggle("open")));
   });
   if (achCancelBtn) achCancelBtn.addEventListener("click", function() {
     addAchForm.classList.remove("open");
     document.getElementById("achNameInput").value = "";
     document.getElementById("achUrlInput").value = "";
     achIconInput.value = ""; achIconName.textContent = "No file";
+    addAchBtn.setAttribute("aria-expanded", "false");
+    addAchBtn.focus(); // the form closed around this Cancel button
   });
   if (achIconInput) achIconInput.addEventListener("change", function() {
     achIconName.textContent = achIconInput.files[0] ? achIconInput.files[0].name : "No file";
@@ -2689,7 +2851,11 @@ async function deletePlayer(nick, rowEl) {
     await adminRequest("/rest/v1/player_config?nickname=eq." + encodeURIComponent(nick), { method: "DELETE", mustMatch: true });
     writeLog("Player deleted", nick);
     st.players = st.players.filter(function(p) { return p.nick !== nick; });
-    if (rowEl) rowEl.remove();
+    if (rowEl) {
+      var index = Array.prototype.indexOf.call(playerList.children, rowEl);
+      rowEl.remove();
+      focusAfterDelete(playerList, index, adminSearch); // the tab has no heading
+    }
     updateStats();
   } catch (e) {
     if (rowEl) rowEl.style.opacity = "1";
@@ -2732,11 +2898,13 @@ async function addNewPlayer() {
     btn.disabled = false; btn.textContent = "+ Add Player";
   }
 
+  /* #addPlayerMsg is a status region; empty, it takes no room. An error stays until the next
+   * try (there is time to read it), a success clears itself. */
   function showAddMsg(text, type) {
     if (!msg) return;
+    clearTimeout(msg._hideTimer);
     msg.textContent = text;
     msg.style.color = type === "error" ? "#ff7676" : "var(--accent)";
-    msg.style.display = "inline";
-    setTimeout(function() { msg.style.display = "none"; }, 3000);
+    if (type !== "error") msg._hideTimer = setTimeout(function() { msg.textContent = ""; }, 3000);
   }
 }
