@@ -14,14 +14,15 @@ async function sbFetch(path) {
 }
 
 /* Fetch all rows with pagination (Supabase default limit = 1000).
- * `order` must be deterministic (end with a unique column) so pages never overlap. */
-async function sbFetchAll(table, select = "*", order = "") {
+ * `order` must be deterministic (end with a unique column) so pages never overlap.
+ * `fetchPage(path)` defaults to the public read; the admin panel passes its own. */
+async function sbFetchAll(table, select = "*", order = "", fetchPage = sbFetch) {
   const rows = [];
   const pageSize = 1000;
   let offset = 0;
   while (true) {
     const orderParam = order ? `&order=${order}` : "";
-    const data = await sbFetch(
+    const data = await fetchPage(
       `${table}?select=${select}${orderParam}&limit=${pageSize}&offset=${offset}`
     );
     rows.push(...data);
@@ -95,7 +96,7 @@ function computeRatings(matches, players, adjustments, settingsMap, groups, opti
   if (!ratingGroups.length) throw new Error("No rating groups configured");
 
   const numberSetting = (key, fallback) => {
-    const value = Number(String(settingsMap[key] ?? fallback).replace(",", "."));
+    const value = numberOrNaN(String(settingsMap[key] ?? "").trim().replace(",", "."));
     return Number.isFinite(value) && value >= 0 ? value : fallback;
   };
   const WIN_MIN = numberSetting("WinMin", 3);
@@ -116,7 +117,7 @@ function computeRatings(matches, players, adjustments, settingsMap, groups, opti
       hash = Math.imul(hash, 16777619);
     }
     hash |= 0;
-    return lo + (Math.abs(hash) % (hi - lo + 1));
+    return lo + (Math.abs(hash) % (Math.round(hi - lo) + 1)); // max − min is a whole number
   }
 
   /* Only player_config nicknames take part. Rated players (current) start from an explicit

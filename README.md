@@ -46,6 +46,7 @@ applies a day's matches, and the row number is part of the match signature used 
   are rated and neither is suspended (`suspended_from`/`suspended_to`) on that day.
   Adjustments dated after today (or after the last match day, if later) wait until
   their date, so a monthly reset saved ahead of time does not change ratings early.
+  An adjustment without a numeric `new_rating` or a `YYYY-MM-DD` `applied_date` is ignored.
 - **Points.** Each match gets a base value from a deterministic hash of its signature:
   `min + k` for a whole number `k` from 0 to `max − min`. A win adds
   `base × coef` (the winner's group coefficient) to the winner and takes the same
@@ -136,13 +137,16 @@ player is added but is not read. Storage buckets (both public): `player-avatars`
   `localStorage` (`esb_admin_session`), refreshes it when it expires and sends the user's
   access token with all of its own reads and writes (the shared `buildRatings()` reads
   use the publishable key). After login it calls `POST /rest/v1/rpc/is_admin` and signs
-  out an account that is not an admin.
+  out an account that is not an admin, or whose admin status cannot be checked (so the
+  migration must be applied before the new front end is deployed).
 - The esb-sync function uses the service role key, which bypasses RLS.
 
 Rollout of the migration:
 
 1. Apply it: paste it into the Supabase SQL editor and run it, or `supabase db push`.
-   It is safe to run again.
+   It is safe to run again. A listed table that does not exist yet is skipped with a
+   warning and gets no protection, so check the output and run the migration again after
+   creating such a table.
 2. Add each admin (the user must already exist under Authentication > Users):
    ```sql
    insert into public.admin_users (user_id)

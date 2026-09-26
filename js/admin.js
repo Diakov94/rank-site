@@ -178,6 +178,11 @@ async function adminRequest(path, opts) {
   return result;
 }
 
+/* Every row of a table, read with the admin's token and paged like the public reads. */
+function adminRows(table, select, order) {
+  return sbFetchAll(table, select, order, function(path) { return adminRequest("/rest/v1/" + path); });
+}
+
 /* A .catch handler that rethrows the error with `prefix` before its message. */
 function rethrowAs(prefix) {
   return function(e) { throw new Error(prefix + e.message); };
@@ -209,12 +214,21 @@ async function tryLogin() {
       return;
     }
     storeSession(sessionFromAuth(data, email));
-    if (!(await checkIsAdmin())) {
+    var isAdmin;
+    try {
+      isAdmin = await checkIsAdmin();
+    } catch (e) {
+      if (!st.session) return; // a rejected token already ended the session and said so
+      console.error("is_admin check failed:", e);
+      await endSession();
+      showLoginError("Could not verify admin access. Try again.");
+      return;
+    }
+    if (!isAdmin) {
       await endSession();
       showLoginError("This account is not an admin.");
       return;
     }
-    if (!st.session) return; // the check ended the session
     passwordInput.value = "";
     writeLog("Logged in", adminEmail());
     enterPanel();
@@ -228,15 +242,10 @@ async function tryLogin() {
   }
 }
 
-/* False only when the server says the account is not an admin. If the call itself fails
- * (for example is_admin() does not exist before the RLS migration), the login continues. */
+/* The server's answer to "is this account an admin?" (public.is_admin(), created by the
+ * RLS migration). Throws when the question cannot be asked. */
 async function checkIsAdmin() {
-  try {
-    return (await adminRequest("/rest/v1/rpc/is_admin", { method: "POST", body: {} })) !== false;
-  } catch (e) {
-    console.warn("is_admin check failed, continuing:", e);
-    return true;
-  }
+  return (await adminRequest("/rest/v1/rpc/is_admin", { method: "POST", body: {} })) === true;
 }
 
 /* Forget the session here and, best effort, on the server. */
@@ -293,13 +302,13 @@ async function loadAdminData() {
   try {
     /* Load players from player_config + current ratings from engine, with the rest alongside */
     var [configRes, ratingsResult, hiddenRes, achRes, playerAchRes] = await Promise.allSettled([
-      adminRequest("/rest/v1/player_config?select=nickname,initial_rating&order=nickname.asc"),
+      adminRows("player_config", "nickname,initial_rating", "nickname.asc"),
       typeof buildRatings === "function"
         ? buildRatings()
         : Promise.reject(new Error("Rating engine is unavailable")),
-      adminRequest("/rest/v1/hidden_players?select=nick"),
-      adminRequest("/rest/v1/achievements?select=id,name,icon_url,url&order=id.asc"),
-      adminRequest("/rest/v1/player_achievements?select=nick,achievement_id"),
+      adminRows("hidden_players", "nick", "nick.asc"),
+      adminRows("achievements", "id,name,icon_url,url", "id.asc"),
+      adminRows("player_achievements", "nick,achievement_id", "nick.asc,achievement_id.asc"),
     ]);
 
     var configPlayers = rowsOrEmpty(configRes, "config", "Could not load players:");
@@ -347,11 +356,7 @@ async function loadAdminData() {
 }
 
 function sortPlayers() {
-  st.players.sort(function(a, b) {
-    var ra = a.rating != null ? a.rating : -Infinity;
-    var rb = b.rating != null ? b.rating : -Infinity;
-    return rb - ra;
-  });
+  st.players.sort(compareRanking);
 }
 
 /* Load failures that affect the Players tab without emptying it. */
@@ -403,6 +408,8 @@ async function loadFormulaSettings() {
    * overwrite them with the form's defaults. */
   var btn = document.getElementById("saveFormulaBtn");
   if (btn) btn.disabled = true;
+  var msg = document.getElementById("formulaMsg");
+  if (msg) { msg.style.display = "none"; msg.textContent = ""; }
   try {
     var rows = await adminRequest("/rest/v1/settings?select=key,value");
     var values = {};
@@ -434,7 +441,7 @@ async function saveFormulaSettings() {
   for (var i = 0; i < ranges.length; i++) {
     var label = ranges[i][0], lo = ranges[i][1], hi = ranges[i][2];
     if (lo > hi) { showFormulaMessage(label + " min must not be greater than " + label.toLowerCase() + " max.", true); return; }
-    if (!Number.isInteger(hi - lo)) {
+    if (Math.abs((hi - lo) - Math.round(hi - lo)) > 1e-9) {
       showFormulaMessage(label + ": max − min must be a whole number. Each match awards min + 0, 1, 2 … points up to max, so 2.5–4.5 works but 2.5–3 does not.", true);
       return;
     }
@@ -535,7 +542,7 @@ async function loadResetPlayers() {
   try {
     // Fetch players and any existing resets for this date in parallel
     var [playersRes, existingRes] = await Promise.allSettled([
-      adminRequest("/rest/v1/player_config?select=nickname,initial_rating&order=nickname.asc"),
+      adminRows("player_config", "nickname,initial_rating", "nickname.asc"),
       adminRequest("/rest/v1/rating_adjustments?applied_date=eq." + dateVal + "&reason=eq.monthly_reset&select=id,nickname,new_rating&order=id.asc"),
     ]);
     if (seq !== resetLoadSeq) return; // a newer load replaced this one

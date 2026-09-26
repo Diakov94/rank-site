@@ -350,6 +350,19 @@ test("settings fall back to their defaults when non-finite or negative", () => {
   assert.deepEqual(ratingsOf(zero), { A: 1003, B: 997 });
   const comma = run({ groups: FLAT, players, matches, settings: { WinMin: "2,5", WinMax: "2,5" } });
   assert.deepEqual(ratingsOf(comma), { A: 1003.5, B: 998.5 });
+  const blank = run({ groups: FLAT, players, matches, settings: { WinMin: "", WinMax: "  ", DrawMin: null } });
+  assert.deepEqual(ratingsOf(blank), { A: 1004, B: 998 }); // blank means missing: defaults
+});
+
+test("a whole points range that is inexact in floating point awards min + a whole number", () => {
+  const players = roster({ A: 1000, B: 1000 });
+  const awarded = new Set();
+  for (let i = 0; i < 60; i++) {
+    const r = run({ groups: FLAT, players, matches: [match("2026-01-05", "A", "B", 1, 0, i + 2)], settings: { WinMin: "1.3", WinMax: "3.3" } });
+    awarded.add(Math.round((ratingsOf(r).A - 1000) * 100) / 100);
+  }
+  assert.ok([...awarded].every((v) => [1.3, 2.3, 3.3].includes(v)), [...awarded].join(","));
+  assert.ok(awarded.size > 1);
 });
 
 /* ================== Existing rating semantics ================== */
@@ -501,4 +514,27 @@ test("buildRatings rejects when the Google Sheets index cannot be loaded", async
     : fetch(url, init));
   const s = loadSite({ console: silentConsole, fetch: sheetsDown });
   await assert.rejects(s.buildRatings(), /Sheets: failed to load index: HTTP 500/);
+});
+
+test("buildRatings applies adjustments up to max(today, last match date) and holds back later ones", async () => {
+  const tables = {
+    player_config: roster({ A: 1000, B: 1000 }),
+    rating_groups: GROUPS,
+    rating_adjustments: [
+      adj("2099-06-01", "A", 900, "penalty", 1), // after today, before the sheet's last match: applies
+      adj("2099-07-01", "B", 1500, "monthly_reset", 2), // after both: held back
+    ],
+  };
+  const { fetch } = supabaseFetch(tables);
+  const csv = '"Date","T","Time","T1","T2","P1","P2","S1","","S2"\n"15.06.2099","T","7:30:00","X","Y","A","B","1","","0"';
+  const withSheet = async (url, init) => {
+    const u = new URL(url);
+    if (u.hostname !== "docs.google.com") return fetch(url, init);
+    if (u.pathname.includes("DOC99")) return { ok: true, status: 200, text: async () => (u.searchParams.get("sheet") === "Jun99" ? csv : "") };
+    return { ok: true, status: 200, text: async () => '"","2099","https://docs.google.com/spreadsheets/d/DOC99/edit"' };
+  };
+  const s = loadSite({ console: silentConsole, fetch: withSheet });
+  const result = await s.buildRatings();
+  // A is set to 900 (Rookie, coef 2) and wins 3 x 2 = 6; B's July reset has not happened yet.
+  assert.deepEqual(ratingsOf(result), { B: 994, A: 906 });
 });
