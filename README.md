@@ -320,7 +320,10 @@ buckets are left to their own policies.
 - **Users tab:** the list and the create, set password and delete actions go through the
   admin-users function. Changing a user's role upserts their `user_roles` row directly
   (`on_conflict=user_id`); "No role (remove access)" deletes it. The role choices are the
-  roles you can grant, and your own row is read-only.
+  roles you can grant, and your own row is read-only. A role picked with the mouse or a
+  finger is saved at once; one picked with the keyboard waits for Enter or the "Save role"
+  button, so moving through the list with the arrow keys does not grant each role on the
+  way.
 - **Roles tab:** each role with its name, description, number of users and permission
   checkboxes; ticking one inserts a `role_permissions` row, unticking deletes it. Only
   the super admin sees this tab, and the database accepts these writes only from the
@@ -364,6 +367,23 @@ then check it (the SQL self-test is optional). The notes below explain how the p
 Switching off public sign-ups (Authentication → Sign In / Providers → Allow new users to
 sign up) is recommended but not required: a new account has no role, so it cannot change
 anything.
+
+## Accessibility
+
+Both pages aim at WCAG 2.1 AA:
+
+- Everything works from the keyboard: a leaderboard row's nickname and its "vs" button are
+  buttons, badge links and the history list take focus, the compare dialog keeps focus
+  inside (the page behind it is `inert`) and Escape closes it, as well as the hover card,
+  the chart tip and badge names. In the admin panel the photo and icon uploads, the badge
+  picker (Escape closes it and returns focus), the switches and the colour pickers are
+  keyboard reachable, and keyboard focus always shows a 2px accent outline.
+- Controls have names that say which player, user, role or date they act on; tabs expose
+  `aria-current`, disclosures `aria-expanded`, the "vs" pick `aria-pressed`.
+- Screen readers hear status changes: search results, compare picks, refreshes, saves,
+  form errors and load failures (`role="status"`, and `role="alert"` for login errors).
+- Text reaches 4.5:1 and field borders 3:1 against the page and card backgrounds. The
+  animated green glow and the ALPHA watermark are decorative and not counted.
 
 ## Local development
 

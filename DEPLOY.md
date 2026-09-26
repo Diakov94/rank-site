@@ -19,7 +19,8 @@ a time and in this order:
 1. `supabase/migrations/20260926000000_admin_only_writes.sql`: everyone can read, and
    only admins can change data.
 2. `supabase/migrations/20260927000000_roles.sql`: roles and permissions. On its first
-   run, anyone already listed in `admin_users` becomes a super admin.
+   run, anyone already listed in `admin_users` becomes a super admin. It also adds the
+   `created_at` column to `rating_adjustments` if the table does not have it yet.
 
 The roles file is safe to run again. Do not run the first file again after the roles
 file, because that brings back its old admin checks; if it happens, run the roles file
@@ -122,6 +123,7 @@ Merge the pull request so that your hosting publishes the new version.
 | --- | --- |
 | "This account has no role in the admin panel." | Do step 2 for that account, or give it a role in the Users tab. |
 | "Could not verify admin access." | Check that both migrations ran (step 1). |
+| "Connection error. Try again." when logging in | The network or Supabase did not answer. You stay signed in; try again in a moment. |
 | The Users tab shows an error | The `admin-users` function is not deployed yet (step 3). |
 | The Users tab says "The server function rejected your sign-in (… Invalid JWT …)" | Deploy `admin-users` again with `--no-verify-jwt` (step 3). |
 | Locked out of the admin panel | The SQL Editor always works, whatever the roles are. Run step 2 again for your account. |
@@ -147,7 +149,8 @@ Merge the pull request so that your hosting publishes the new version.
 1. `supabase/migrations/20260926000000_admin_only_writes.sql`: читати можуть усі, а
    змінювати дані можуть лише адміністратори.
 2. `supabase/migrations/20260927000000_roles.sql`: ролі та права доступу. Під час першого
-   запуску всі, хто вже є в `admin_users`, стають super admin.
+   запуску всі, хто вже є в `admin_users`, стають super admin. Також вона додає до
+   `rating_adjustments` стовпець `created_at`, якщо його ще немає.
 
 Файл ролей можна безпечно запускати повторно. Не запускайте перший файл знову після
 файлу ролей, бо це повертає його старі перевірки адміністраторів; якщо так сталося,
@@ -251,6 +254,7 @@ URL функції; вона лише копіює завершені матчі
 | --- | --- |
 | "This account has no role in the admin panel." | Виконайте крок 2 для цього облікового запису або призначте йому роль на вкладці Users. |
 | "Could not verify admin access." | Перевірте, що обидві міграції виконано (крок 1). |
+| "Connection error. Try again." під час входу | Мережа або Supabase не відповіли. Ви залишаєтеся в системі; спробуйте ще раз трохи пізніше. |
 | На вкладці Users показується помилка | Функцію `admin-users` ще не розгорнуто (крок 3). |
 | На вкладці Users написано "The server function rejected your sign-in (… Invalid JWT …)" | Розгорніть `admin-users` ще раз із `--no-verify-jwt` (крок 3). |
 | Немає доступу до адмін-панелі | SQL Editor працює завжди, незалежно від ролей. Виконайте крок 2 ще раз для свого облікового запису. |
