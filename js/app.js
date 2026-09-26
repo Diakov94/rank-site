@@ -87,6 +87,7 @@ const state = {
 };
 
 const hoverQuery = window.matchMedia("(hover: hover)");
+const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
 /* ================== INIT ================== */
 init();
@@ -119,10 +120,11 @@ async function init() {
   els.dateFrom?.addEventListener("change", onRangeChange);
   els.dateTo?.addEventListener("change",   onRangeChange);
 
-  // Resize → redraw chart without re-animating
+  // Resize → redraw chart without re-animating (a running animation picks up the new size)
   window.addEventListener("resize", debounce(() => {
     if (!state.chartSeries?.length) return;
     state.chartDims = computeChartDims(state.chartSeries);
+    if (state.chartAnimating) return;
     drawChartFrame(state.chartSeries, state.chartDims, {
       progress: 1,
       hoverIdx: state.chartHoverIdx ?? undefined,
@@ -749,7 +751,7 @@ function computeChartDims(series) {
 
 function drawChartFrame(series, dims, opts = {}) {
   if (!els.chart) return;
-  const { W, H, dpr, pad, innerH, max, range, n, xAt, yAt } = dims;
+  const { W, H, dpr, pad, innerW, innerH, max, range, n, xAt, yAt } = dims;
   const progress = opts.progress != null ? opts.progress : 1;
   const hoverIdx = opts.hoverIdx != null ? opts.hoverIdx : null;
 
@@ -779,15 +781,14 @@ function drawChartFrame(series, dims, opts = {}) {
     ctx.fillText(v.toFixed(digits), pad.l - 6, y);
   }
 
-  // Animated portion
-  const maxIndex = Math.max(0, Math.floor((n - 1) * progress));
-  const partial = (n - 1) * progress - maxIndex;
-  const lastX = (maxIndex < n - 1 && partial > 0)
-    ? xAt(maxIndex) + (xAt(maxIndex + 1) - xAt(maxIndex)) * partial
-    : xAt(maxIndex);
-  const lastY = (maxIndex < n - 1 && partial > 0)
-    ? yAt(series[maxIndex].rating) + (yAt(series[maxIndex + 1].rating) - yAt(series[maxIndex].rating)) * partial
-    : yAt(series[maxIndex].rating);
+  // Animation reveals the finished chart from left to right, so the month breaks,
+  // bands, labels and dots appear as the reveal reaches them.
+  ctx.save();
+  if (progress < 1) {
+    ctx.beginPath();
+    ctx.rect(0, 0, pad.l + innerW * progress, H);
+    ctx.clip();
+  }
 
   // Build month segments (break chart at month boundaries)
   const grad = ctx.createLinearGradient(0, pad.t, 0, H - pad.b);
@@ -796,24 +797,20 @@ function drawChartFrame(series, dims, opts = {}) {
 
   const segs = [];
   let segStart = 0;
-  for (let i = 1; i <= maxIndex; i++) {
+  for (let i = 1; i < n; i++) {
     if (series[i - 1].date.slice(0, 7) !== series[i].date.slice(0, 7)) { // "YYYY-MM" changed
       segs.push([segStart, i - 1]);
       segStart = i;
     }
   }
-  segs.push([segStart, maxIndex]);
+  segs.push([segStart, n - 1]);
 
   // Filled area — one fill per month segment
-  segs.forEach(([s, e], si) => {
-    const isLast = si === segs.length - 1;
-    const ex = (isLast && maxIndex < n - 1 && partial > 0) ? lastX : xAt(e);
-    const ey = (isLast && maxIndex < n - 1 && partial > 0) ? lastY : yAt(series[e].rating);
+  segs.forEach(([s, e]) => {
     ctx.beginPath();
     ctx.moveTo(xAt(s), H - pad.b);
     for (let i = s; i <= e; i++) ctx.lineTo(xAt(i), yAt(series[i].rating));
-    if (isLast && maxIndex < n - 1 && partial > 0) ctx.lineTo(lastX, lastY);
-    ctx.lineTo(ex, H - pad.b);
+    ctx.lineTo(xAt(e), H - pad.b);
     ctx.closePath();
     ctx.fillStyle = grad;
     ctx.fill();
@@ -823,15 +820,13 @@ function drawChartFrame(series, dims, opts = {}) {
   ctx.lineWidth = 2;
   ctx.lineJoin = "round";
   ctx.lineCap = "round";
-  segs.forEach(([s, e], si) => {
-    const isLast = si === segs.length - 1;
+  segs.forEach(([s, e]) => {
     ctx.beginPath();
     ctx.strokeStyle = "#35c07a";
     for (let i = s; i <= e; i++) {
       const x = xAt(i), y = yAt(series[i].rating);
       if (i === s) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     }
-    if (isLast && maxIndex < n - 1 && partial > 0) ctx.lineTo(lastX, lastY);
     ctx.stroke();
   });
 
@@ -868,21 +863,20 @@ function drawChartFrame(series, dims, opts = {}) {
     ctx.fillText(label, midX, topY - 4);
   });
 
-  // Data point dots (only after animation completes)
-  if (progress >= 1) {
-    for (let i = 0; i < n; i++) {
-      const x = xAt(i), y = yAt(series[i].rating);
-      ctx.fillStyle = "#35c07a";
-      ctx.beginPath();
-      ctx.arc(x, y, i === n - 1 ? 4.5 : 3, 0, Math.PI * 2);
-      ctx.fill();
-      if (i === n - 1) {
-        ctx.strokeStyle = "rgba(11,15,20,1)";
-        ctx.lineWidth = 2;
-        ctx.stroke();
-      }
+  // Data point dots
+  for (let i = 0; i < n; i++) {
+    const x = xAt(i), y = yAt(series[i].rating);
+    ctx.fillStyle = "#35c07a";
+    ctx.beginPath();
+    ctx.arc(x, y, i === n - 1 ? 4.5 : 3, 0, Math.PI * 2);
+    ctx.fill();
+    if (i === n - 1) {
+      ctx.strokeStyle = "rgba(11,15,20,1)";
+      ctx.lineWidth = 2;
+      ctx.stroke();
     }
   }
+  ctx.restore();
 
   // Hover marker
   if (hoverIdx != null && hoverIdx >= 0 && hoverIdx < n) {
@@ -924,7 +918,7 @@ function drawChartAnimated(series, animate = true) {
   state.chartDims = computeChartDims(series);
   state.chartHoverIdx = null;
 
-  if (!series.length || !animate) {
+  if (!series.length || !animate || reducedMotion.matches) {
     drawChartFrame(series, state.chartDims, { progress: 1 });
     state.chartAnimating = false;
     return;
