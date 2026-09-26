@@ -23,23 +23,21 @@
 --   recreates the same policies. A table in public that does not exist yet is
 --   skipped with a warning; run the file again after creating it.
 --
--- How to add an admin (the user must already exist under Authentication > Users)
---   insert into public.admin_users (user_id)
---   select id from auth.users where email = 'admin@example.com';
---   Remove one with: delete from public.admin_users where user_id = '<uuid>';
+-- Rollout: this migration alone is not a deployable state. The current admin panel
+--   needs 20260927000000_roles.sql (public.my_access()) and cannot sign in without it.
+--   Follow DEPLOY.md: apply both migrations, make yourself super admin, then publish
+--   the site. The old front end's admin panel writes with the publishable key, so its
+--   writes stop working as soon as this migration runs; the public page keeps working
+--   throughout.
 --
--- Rollout order
---   1. Apply this migration.
---   2. Add the admin rows (above).
---   3. Deploy the new front end, whose admin panel signs in with Supabase Auth and
---      sends the user's access token.
---   The old front end's admin panel writes with the publishable key, so its writes
---   stop working as soon as step 1 runs; the public page keeps working throughout.
+-- How to add an admin: once the roles migration has run, add admins to
+--   public.user_roles as shown in that file's header or DEPLOY.md, step 2. The roles
+--   migration reads admin_users only once, while user_roles is empty.
 --
 -- Disabling public sign-ups (Authentication > Sign In / Providers > Allow new users to
--- sign up) is recommended but
--- not required: every write checks admin_users, so a self-registered user cannot
--- write anything.
+-- sign up) is recommended but not required: every write checks admin_users (after the
+-- roles migration, the permissions of the caller's role), so a self-registered user
+-- cannot write anything.
 -- ============================================================================
 
 begin;
@@ -55,7 +53,8 @@ create table if not exists public.admin_users (
 alter table public.admin_users enable row level security;
 
 -- SECURITY DEFINER so it can read admin_users, which the caller cannot.
--- The admin panel calls it after login: POST /rest/v1/rpc/is_admin.
+-- 20260927000000_roles.sql redefines it as "the caller has a role"; the current admin
+-- panel calls public.my_access() instead.
 create or replace function public.is_admin()
 returns boolean
 language sql

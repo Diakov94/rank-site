@@ -18,7 +18,8 @@ const syncModule = import(
 
 const SB = { code: "ECF-location-1" };
 
-/* A finished Stamford Bridge tournament on `day` with these matches (ids or match objects). */
+/* A finished Stamford Bridge tournament on `day` with these matches (ids or match objects).
+ * Spread it with `page`, `location` or `status_id` to change where and how ESB lists it. */
 function tournament(id, day, matches) {
   return {
     id,
@@ -45,6 +46,8 @@ function match(id, day) {
  *   refuse(row)    an error object for a row the database refuses because of its data
  *   insertError    an error object every insert returns (the network, a permission...)
  *   failList(id)   true when that tournament's match list request fails
+ *   pages(day)     the number of tournament pages ESB reports for a day (default 1)
+ *   failPage(day, page)  true when that tournament page request fails
  *   tickPerInsert  ms the clock moves on each insert call
  */
 async function setup(tournaments, options = {}) {
@@ -75,11 +78,13 @@ async function setup(tournaments, options = {}) {
         return t.matches;
       }
       const day = decodeURIComponent(url.match(/dateFrom=([^&]+)/)[1]).slice(0, 10).replaceAll("/", "-");
+      const page = Number(url.match(/[?&]page=(\d+)/)[1]);
+      if (options.failPage?.(day, page)) throw new Error("HTTP 502");
       return {
-        totalPages: 1,
+        totalPages: options.pages?.(day) ?? 1,
         tournaments: tournaments
-          .filter((t) => t.day === day)
-          .map((t) => ({ id: t.id, token: `T${t.id}`, location: SB, status_id: 4 })),
+          .filter((t) => t.day === day && (t.page ?? 1) === page)
+          .map((t) => ({ id: t.id, token: `T${t.id}`, location: t.location ?? SB, status_id: t.status_id ?? 4 })),
       };
     },
     async existingIds(ids) {
@@ -217,6 +222,31 @@ test("a failed match list fails the day, but the other tournaments' matches are 
   assert.deepEqual([...world.table.keys()], [11]);
   assert.equal(body.nextDateFrom, "2026-03-05");
   assert.deepEqual(body.errors, ["day 2026-03-05 tournament 2: HTTP 502"]);
+});
+
+test("tournament pages: every page is read, only finished SB tournaments count, a failed page fails the day", async () => {
+  let page2Failures = 1;
+  const world = await setup([
+    tournament(1, "2026-03-05", [11]),
+    { ...tournament(2, "2026-03-05", [21]), page: 2 },
+    { ...tournament(3, "2026-03-05", [31]), location: { code: "other" } },
+    { ...tournament(4, "2026-03-05", [41]), status_id: 3 },
+  ], {
+    cursor: "2026-03-05",
+    pages: () => 2,
+    failPage: (day, page) => page === 2 && page2Failures-- > 0,
+  });
+  const first = (await world.run()).body;
+  assert.equal(first.inserted, 0);
+  assert.equal(world.table.size, 0, "nothing of a day with a missing page is saved");
+  assert.equal(first.nextDateFrom, "2026-03-05");
+  assert.deepEqual(first.errors, ["day 2026-03-05: tournaments page 2: HTTP 502"]);
+  assert.equal(world.cursor(), "2026-03-05");
+
+  const second = (await world.run()).body;
+  assert.equal(second.ok, true);
+  assert.equal(second.sbTournamentsFound, 2);
+  assert.deepEqual([...world.table.keys()].sort(), [11, 21]);
 });
 
 test("auto mode: starts at 2026-01-01 without a cursor, runs at most 14 days, and moves the cursor", async () => {

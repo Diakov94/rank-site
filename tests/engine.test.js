@@ -745,25 +745,32 @@ test("buildRatings: sheet times and created_at place a manual adjustment mid-day
   assert.deepEqual(plain(result.history.A), [adjusted("2026-06-15", 1200, 1004.5, "15:00"), end("2026-06-15", 1203, 2)]);
 });
 
-test("buildRatings applies adjustments up to max(current work day, last match date) and holds back later ones", async () => {
-  const tables = {
-    player_config: roster({ A: 1000, B: 1000 }),
-    rating_groups: GROUPS,
-    rating_adjustments: [
-      adj("2099-06-01", "A", 900, "penalty", 1), // after the current work day, before the sheet's last match: applies
-      adj("2099-07-01", "B", 1500, "monthly_reset", 2), // after both: held back
-    ],
+test("buildRatings applies adjustments up to the current work day, or the sheet's last match day one day ahead", async () => {
+  const run = async (sheetDate) => {
+    const tables = {
+      player_config: roster({ A: 1000, B: 1000 }),
+      rating_groups: GROUPS,
+      rating_adjustments: [
+        adj("2026-06-16", "A", 900, "penalty", 1), // the day after the current work day
+        adj("2026-06-17", "B", 1500, "monthly_reset", 2), // two days after
+      ],
+    };
+    const { fetch } = supabaseFetch(tables);
+    const csv = `"Date","T","Time","T1","T2","P1","P2","S1","","S2"\n"${sheetDate}","T","7:30:00","X","Y","A","B","1","","0"`;
+    const withSheet = async (url, init) => {
+      const u = new URL(url);
+      if (u.hostname !== "docs.google.com") return fetch(url, init);
+      if (u.pathname.includes("DOC26")) return { ok: true, status: 200, text: async () => (u.searchParams.get("sheet") === "Jun26" ? csv : "") };
+      return { ok: true, status: 200, text: async () => '"","2026","https://docs.google.com/spreadsheets/d/DOC26/edit"' };
+    };
+    const s = loadSite({ console: silentConsole, fetch: withSheet });
+    freezeClock(s, "2026-06-15T05:00:00Z"); // 08:00 Kyiv: the work day is 2026-06-15
+    return ratingsOf(await s.buildRatings());
   };
-  const { fetch } = supabaseFetch(tables);
-  const csv = '"Date","T","Time","T1","T2","P1","P2","S1","","S2"\n"15.06.2099","T","7:30:00","X","Y","A","B","1","","0"';
-  const withSheet = async (url, init) => {
-    const u = new URL(url);
-    if (u.hostname !== "docs.google.com") return fetch(url, init);
-    if (u.pathname.includes("DOC99")) return { ok: true, status: 200, text: async () => (u.searchParams.get("sheet") === "Jun99" ? csv : "") };
-    return { ok: true, status: 200, text: async () => '"","2099","https://docs.google.com/spreadsheets/d/DOC99/edit"' };
-  };
-  const s = loadSite({ console: silentConsole, fetch: withSheet });
-  const result = await s.buildRatings();
-  // A is set to 900 (Rookie, coef 2) and wins 3 x 2 = 6; B's July reset has not happened yet.
-  assert.deepEqual(ratingsOf(result), { B: 994, A: 906 });
+  // The sheet is one day ahead: A is set to 900 (Rookie, coef 2) and wins 3 x 2 = 6; B's reset
+  // two days ahead is held back.
+  assert.deepEqual(await run("16.06.2026"), { B: 994, A: 906 });
+  // A match mistyped days ahead releases nothing after the current work day.
+  // A: 1000 (Mid, coef 1.5) wins 4.5; neither adjustment applies yet.
+  assert.deepEqual(await run("20.06.2026"), { A: 1004.5, B: 995.5 });
 });

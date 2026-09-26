@@ -290,10 +290,11 @@ function computeRatings(matches, players, adjustments, settingsMap, groups, opti
 async function buildRatings() {
   const { matches, players, adjustments, settingsMap, groups } =
     await loadEngineData();
-  /* Apply adjustments up to the current work day (or the last match day, if the sheet is
-   * ahead of the clock). */
+  /* Apply adjustments up to the current work day, or the next day when the sheet already has
+   * matches on it (the sheet's clock is a little ahead). A date further ahead is a typo and
+   * must not release adjustments saved ahead of time. */
   const lastMatchDate = matches.length ? matches[matches.length - 1].date : "";
   const workDay = workDayOf();
-  const applyUntil = lastMatchDate > workDay ? lastMatchDate : workDay;
+  const applyUntil = lastMatchDate > workDay && lastMatchDate <= shiftIsoDate(workDay, 1) ? lastMatchDate : workDay;
   return computeRatings(matches, players, adjustments, settingsMap, groups, { applyUntil });
 }

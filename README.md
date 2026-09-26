@@ -85,9 +85,10 @@ adjustments saved during the day.
   - **Monthly reset** (`reason = monthly_reset`): at 07:30 of its date (the 1st),
     whenever it was saved.
 
-  Adjustments dated after the current work day (`workDayOf()`), or after the last match
-  day if that is later, wait until their date, so a monthly reset saved ahead of time
-  does not change ratings early. An adjustment without a numeric `new_rating` or a
+  Adjustments dated after the current work day (`workDayOf()`) wait until their date, so a
+  monthly reset saved ahead of time does not change ratings early. When the sheet already
+  has matches on the next day (its clock is a little ahead), that day counts as well; a
+  match dated further ahead is taken as a typo and releases nothing. An adjustment without a numeric `new_rating` or a
   `YYYY-MM-DD` `applied_date` is ignored.
 - **Points.** Each match gets a base value from a deterministic hash of its signature:
   `min + k` for a whole number `k` from 0 to `max − min`. A win adds
@@ -128,7 +129,9 @@ adjustments saved during the day.
 
 Ratings are reset monthly: the admin panel's Monthly Reset tab saves one `rating_adjustments`
 row per player with reason `monthly_reset` for the chosen date, normally the 1st; the reset
-applies at 07:30 that day. Rating changes shown on the site ("7 days", "1 day") use
+applies at 07:30 that day. Saving inserts the new rows first and then deletes only the
+reset rows of that date saved before them, so a failed save changes nothing and two saves
+of the same month at once never leave it without a reset. Rating changes shown on the site ("7 days", "1 day") use
 `monthDelta(series, days)` from `js/common.js`, which never reaches back before the start
 of the latest month and never measures from an adjusted entry.
 
@@ -294,9 +297,11 @@ buckets are left to their own policies.
   access token with all of its own reads and writes (the shared `buildRatings()` reads use
   the publishable key).
 - After login it calls `POST /rest/v1/rpc/my_access`. An account without a role gets "This
-  account has no role in the admin panel." and is signed out. Any failure, including a
-  missing `my_access` because the roles migration is not applied, gives "Could not verify
-  admin access. Try again." and signs out.
+  account has no role in the admin panel." and is signed out. A network error or a
+  server error (5xx) gives "Connection error. Try again." and keeps the session, with the
+  panel still closed. Any other failure, including a missing `my_access` because the
+  roles migration is not applied, gives "Could not verify admin access. Try again." and
+  signs out.
 - The header shows `<email> · <role name>`, and the panel shows only what the role allows:
 
   | Tab | Shown with | Controls inside |

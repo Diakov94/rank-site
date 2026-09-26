@@ -519,8 +519,9 @@ async function resumeSession() {
 }
 
 /* Asks what the signed-in account may do and keeps it in st.access. When the check fails or
- * the account has no role, it ends the session, says why and returns null. Once stale()
- * reports that another login took over, it returns null and does nothing more. */
+ * the account has no role, it ends the session, says why and returns null; a network error
+ * or a server outage keeps the session (the panel stays closed), so trying again can work.
+ * Once stale() reports that another login took over, it returns null and does nothing more. */
 async function verifyAccess(stale) {
   var access;
   try {
@@ -528,6 +529,10 @@ async function verifyAccess(stale) {
   } catch (err) {
     if (stale() || !st.session) return null; // !st.session: a rejected token already said so
     console.error("Access check failed:", err);
+    if (err instanceof TypeError || err.status >= 500) {
+      showLoginError("Connection error. Try again.");
+      return null;
+    }
     await endSession();
     showLoginError(ACCESS_CHECK_FAILED_MSG);
     return null;
@@ -936,9 +941,11 @@ async function saveMonthlyReset() {
     }
     writeLog("Monthly reset saved", dateVal + " — " + records.length + " players");
 
+    /* Only rows saved before this insert: if another save of the same month overlaps, the
+     * later one's rows stay, so the month never ends up without a reset. */
     try {
       await adminRequest(
-        "/rest/v1/rating_adjustments?applied_date=eq." + dateVal + "&reason=eq.monthly_reset&id=not.in.(" + newIds.join(",") + ")",
+        "/rest/v1/rating_adjustments?applied_date=eq." + dateVal + "&reason=eq.monthly_reset&id=lt." + Math.min.apply(null, newIds),
         { method: "DELETE" }
       );
     } catch (e) {
