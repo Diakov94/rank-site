@@ -3,7 +3,7 @@
  *
  * Modes:
  *   Auto (GET, or POST without dateFrom): resumes from the `esb_sync_cursor` row in
- *   `settings` (2026-01-01 when the row does not exist) up to today, at most
+ *   `settings` (FIRST_DAY when the row does not exist) up to today, at most
  *   MAX_DAYS_PER_RUN days, and moves the cursor to the first day it did not finish.
  *   Once caught up, the cursor goes back to yesterday so every run re-checks two days.
  *   Manual (POST {"dateFrom": "YYYY-MM-DD", "dateTo"?: "YYYY-MM-DD"}): syncs that range
@@ -26,6 +26,8 @@ const MAX_DAYS_PER_RUN = 14; // days processed per invocation
 const CURSOR_KEY = "esb_sync_cursor"; // settings table key
 const FIRST_DAY = "2026-01-01"; // where the first ever auto run starts
 const FETCH_TIMEOUT_MS = 15_000; // per ESB request
+const MATCH_LIST_CONCURRENCY = 4; // ESB match-list requests in flight per day
+const IDS_PER_DUPLICATE_CHECK = 200; // external ids per .in() query (keeps the URL short)
 const TIME_BUDGET_MS = 100_000; // no new day is started after this (the platform limit is 150 s)
 const SYNC_SECRET = Deno.env.get("SYNC_SECRET") ?? "";
 
@@ -50,14 +52,6 @@ function fmtIso(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
 
-/** Date → "YYYY/MM/DD" for ESB API */
-function fmtEsb(d: Date): string {
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(d.getUTCDate()).padStart(2, "0");
-  return `${y}/${m}/${day}`;
-}
-
 /** True for a real calendar date written as "YYYY-MM-DD" (rejects 2026-02-30). */
 function isIsoDate(value: unknown): value is string {
   if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
@@ -73,6 +67,28 @@ function addDays(iso: string, days: number): string {
 
 function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
+}
+
+/** Like Promise.allSettled(items.map(fn)), with at most `limit` calls of fn running at once. */
+async function allSettledLimited<T, R>(
+  items: T[],
+  limit: number,
+  fn: (item: T) => Promise<R>
+): Promise<PromiseSettledResult<R>[]> {
+  const results: PromiseSettledResult<R>[] = new Array(items.length);
+  let next = 0;
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++;
+      try {
+        results[i] = { status: "fulfilled", value: await fn(items[i]) };
+      } catch (reason) {
+        results[i] = { status: "rejected", reason };
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
 }
 
 function jsonResponse(body: unknown, status = 200, extraHeaders: Record<string, string> = {}): Response {
@@ -122,7 +138,7 @@ async function fetchJson(url: string): Promise<any> {
 
 /** Fetch all finished SB tournaments for one calendar day; throws when any page fails. */
 async function fetchSbTournamentsForDay(day: string): Promise<any[]> {
-  const base = fmtEsb(parseDate(day));
+  const base = day.replaceAll("-", "/"); // ESB dates are "YYYY/MM/DD"
   const results: any[] = [];
   let page = 1;
   let totalPages = 1;
@@ -146,42 +162,46 @@ async function fetchSbTournamentsForDay(day: string): Promise<any[]> {
 }
 
 /**
- * Inserts the tournament's matches that are not in the table yet, in one batch.
- * Returns the number inserted. Throws (the day is then retried) when the match list
- * cannot be fetched, the duplicate check fails or the insert fails. Matches with an
- * unusable id or date are skipped with an entry in `errors`.
+ * Adds the tournament's matches to `rows` (String(external_id) → row), skipping ids that
+ * are already in `seen` or `rows`. Matches with an unusable id or date are skipped with an
+ * entry in `errors`. When it throws, it adds none of the tournament's matches.
  */
-async function syncTournament(tournament: any, seen: Set<string>, errors: string[]): Promise<number> {
-  const matches = await fetchJson(`${ESB_API}/tournaments/${tournament.id}/matches`);
+function collectMatchRows(
+  tournament: any,
+  matches: unknown,
+  seen: Set<string>,
+  rows: Map<string, Record<string, unknown>>,
+  errors: string[]
+): void {
   if (!Array.isArray(matches)) {
     // A well-formed answer that is not a list is reported but not retried, so one odd
     // tournament cannot hold the cursor back for ever.
     errors.push(`tournament ${tournament.id}: match list is not an array, skipped`);
-    return 0;
+    return;
   }
 
   const tournamentName =
     tournament.token_international || tournament.token || `Tournament ${tournament.id}`;
 
-  const rows = new Map<string, Record<string, unknown>>(); // String(external_id) → row
+  const tournamentRows = new Map<string, Record<string, unknown>>(); // added to `rows` at the end
   for (const m of matches) {
     const id = m?.id;
-    if (id === null || id === undefined || id === "") {
+    if (id == null || id === "") {
       errors.push(`tournament ${tournament.id}: match without id, skipped`);
       continue;
     }
     const key = String(id);
-    if (seen.has(key) || rows.has(key)) continue;
+    if (seen.has(key) || rows.has(key) || tournamentRows.has(key)) continue;
 
     const playedAt: string = typeof m.date === "string" ? m.date : "";
-    const datePart = playedAt.split("T")[0];
-    const timePart = playedAt.split("T")[1]?.replace("Z", "") ?? null;
+    const [datePart, timeRaw] = playedAt.split("T");
+    const timePart = timeRaw?.replace("Z", "") ?? null;
     if (!isIsoDate(datePart)) {
       errors.push(`match ${key}: unexpected date ${JSON.stringify(m.date ?? null)}, skipped`);
       continue;
     }
 
-    rows.set(key, {
+    tournamentRows.set(key, {
       external_id: id,
       date: datePart,
       time: timePart,
@@ -195,19 +215,26 @@ async function syncTournament(tournament: any, seen: Set<string>, errors: string
       source: "api",
     });
   }
-  if (rows.size === 0) return 0;
+  for (const [key, row] of tournamentRows) rows.set(key, row);
+}
 
-  // Duplicate check scoped to this tournament's ids.
+/**
+ * Inserts the rows whose external_id is not in the table yet, in one batch, and returns
+ * the number inserted. Throws when a duplicate check or the insert fails.
+ */
+async function insertNewRows(rows: Map<string, Record<string, unknown>>, seen: Set<string>): Promise<number> {
   const ids = [...rows.values()].map((r) => r.external_id);
-  const { data: existing, error: selectError } = await supabase
-    .from("matches")
-    .select("external_id")
-    .in("external_id", ids);
-  if (selectError) throw new Error(`duplicate check failed: ${selectError.message}`);
-  for (const row of existing ?? []) {
-    const key = String(row.external_id);
-    rows.delete(key);
-    seen.add(key);
+  for (let i = 0; i < ids.length; i += IDS_PER_DUPLICATE_CHECK) {
+    const { data: existing, error: selectError } = await supabase
+      .from("matches")
+      .select("external_id")
+      .in("external_id", ids.slice(i, i + IDS_PER_DUPLICATE_CHECK));
+    if (selectError) throw new Error(`duplicate check failed: ${selectError.message}`);
+    for (const row of existing ?? []) {
+      const key = String(row.external_id);
+      rows.delete(key);
+      seen.add(key);
+    }
   }
   if (rows.size === 0) return 0;
 
@@ -217,7 +244,12 @@ async function syncTournament(tournament: any, seen: Set<string>, errors: string
   return rows.size;
 }
 
-/** Syncs one day. `failed` means the day must be retried: nothing after it counts as done. */
+/**
+ * Syncs one day: fetches its tournaments' match lists (a few at a time), then inserts the
+ * day's new matches in one batch. `failed` means the day must be retried: nothing after it
+ * counts as done. A failed match-list fetch, duplicate check or insert fails the day; the
+ * matches of the tournaments whose lists did load are still inserted.
+ */
 async function syncDay(
   day: string,
   seen: Set<string>,
@@ -231,15 +263,30 @@ async function syncDay(
     return { found: 0, inserted: 0, failed: true };
   }
 
-  let inserted = 0;
+  const matchLists = await allSettledLimited(
+    tournaments,
+    MATCH_LIST_CONCURRENCY,
+    (tournament) => fetchJson(`${ESB_API}/tournaments/${tournament.id}/matches`)
+  );
   let failed = false;
-  for (const tournament of tournaments) {
+  const rows = new Map<string, Record<string, unknown>>(); // String(external_id) → row
+  for (const [i, tournament] of tournaments.entries()) {
+    const list = matchLists[i];
     try {
-      inserted += await syncTournament(tournament, seen, errors);
+      if (list.status === "rejected") throw list.reason;
+      collectMatchRows(tournament, list.value, seen, rows, errors);
     } catch (e) {
       errors.push(`day ${day} tournament ${tournament.id}: ${errorText(e)}`);
       failed = true;
     }
+  }
+
+  let inserted = 0;
+  try {
+    inserted = await insertNewRows(rows, seen);
+  } catch (e) {
+    errors.push(`day ${day}: ${errorText(e)}`);
+    failed = true;
   }
   return { found: tournaments.length, inserted, failed };
 }
@@ -257,9 +304,6 @@ Deno.serve(async (req) => {
 
   try {
     // ── Determine date range ──────────────────────────────────────────────────
-    // Manual override: POST body { dateFrom: "YYYY-MM-DD", dateTo?: "YYYY-MM-DD" }
-    // Auto mode (no dateFrom): reads the cursor from settings; defaults to 2026-01-01
-    // if the cursor is not set (= first ever run → will fill history from the start).
     let body: Record<string, unknown> | null = null;
     try {
       const parsed = await req.json();
@@ -292,10 +336,9 @@ Deno.serve(async (req) => {
       if (rawTo !== null) {
         return jsonResponse({ ok: false, error: "dateTo requires dateFrom" }, 400);
       }
-      // Auto mode: resume from stored cursor
       const cursor = await getCursor();
       if (cursor === undefined) {
-        fromIso = FIRST_DAY; // first run ever → start from Jan 1
+        fromIso = FIRST_DAY;
       } else if (isIsoDate(cursor) && cursor <= todayIso) {
         fromIso = cursor;
       } else {
@@ -343,16 +386,7 @@ Deno.serve(async (req) => {
 
     // ── Update cursor (auto mode only) ────────────────────────────────────────
     if (!manualMode) {
-      // In auto mode, the cursor moves to the first day this run did not finish
-      // (a failed day is retried next run, never skipped).
-      // But if we've caught up to today, reset cursor to yesterday
-      // so routine runs always re-check the last 2 days.
-      let nextCursor = nextDateFrom;
-      if (nextCursor === null) {
-        const yesterday = new Date();
-        yesterday.setUTCDate(yesterday.getUTCDate() - 1);
-        nextCursor = fmtIso(yesterday);
-      }
+      const nextCursor = nextDateFrom ?? addDays(fmtIso(new Date()), -1);
       try {
         await setCursor(nextCursor);
       } catch (e) {

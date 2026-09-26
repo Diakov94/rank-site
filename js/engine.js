@@ -1,7 +1,8 @@
 /* ============================================================
  * ESportsBattle Rank — Rating Engine
  * Fetches data from Supabase, calculates ratings.
- * Uses SUPABASE, sbHeaders, safeColor, groupForRating and localIsoDate from common.js.
+ * Uses SUPABASE, sbHeaders, safeColor, numberOrNaN, groupForRating, compareRanking and
+ * localIsoDate from common.js.
  * ============================================================ */
 "use strict";
 
@@ -51,15 +52,14 @@ async function loadEngineData() {
  * [{ id, name, min, color, coef }] sorted by min descending. Rows without a finite
  * minimum are dropped; a missing or non-positive coef counts as 1. Idempotent. */
 function normalizeGroups(rows) {
-  const toNumber = (v) => (v === null || v === undefined || v === "" ? NaN : Number(v));
   return (Array.isArray(rows) ? rows : [])
     .filter((g) => g && typeof g === "object")
     .map((g) => {
-      const coef = toNumber(g.coef);
+      const coef = numberOrNaN(g.coef);
       return {
         id: g.id ?? null,
         name: String(g.name ?? ""),
-        min: toNumber(g.min_rating ?? g.min),
+        min: numberOrNaN(g.min_rating ?? g.min),
         color: safeColor(g.color),
         coef: Number.isFinite(coef) && coef > 0 ? coef : 1,
       };
@@ -105,6 +105,9 @@ function computeRatings(matches, players, adjustments, settingsMap, groups, opti
 
   function basePoints(min, max, match, salt) {
     // Mirrors hash32_ and basePoints_ in the supplied Apps Script.
+    const lo = Math.min(min, max);
+    const hi = Math.max(min, max);
+    if (lo === hi) return lo; // a fixed value needs no hash
     const signature = match.signature ?? `${match.date}|#${match.rowIndex ?? 0}|${match.player1}|${match.player2}|${match.score1 ?? ""}|${match.score2 ?? ""}`;
     let hash = 2166136261;
     const input = `${signature}|${salt}`;
@@ -113,35 +116,28 @@ function computeRatings(matches, players, adjustments, settingsMap, groups, opti
       hash = Math.imul(hash, 16777619);
     }
     hash |= 0;
-    const lo = Math.min(min, max);
-    const hi = Math.max(min, max);
-    if (lo === hi) return lo;
     return lo + (Math.abs(hash) % (hi - lo + 1));
   }
 
   /* Only player_config nicknames take part. Rated players (current) start from an explicit
    * initial rating, or join when an adjustment sets their rating. */
-  const configured = new Set();
   const current = new Map();
-  const history = Object.create(null);
+  const history = Object.create(null); // its keys are the configured nicknames
   players.forEach((p) => {
-    configured.add(p.nickname);
     history[p.nickname] = [];
-    const rating = Number(p.initial_rating);
-    if (p.initial_rating !== null && p.initial_rating !== "" && Number.isFinite(rating)) {
-      current.set(p.nickname, rating);
-    }
+    const rating = numberOrNaN(p.initial_rating);
+    if (Number.isFinite(rating)) current.set(p.nickname, rating);
   });
   const coefFor = (nickname) => groupForRating(current.get(nickname), ratingGroups).coef;
 
   /* Adjustments index: date -> [ { nickname, rating, reset } ] in fetched order */
   const adjByDate = new Map();
   adjustments.forEach((a) => {
-    const rating = Number(a.new_rating);
-    if (!configured.has(a.nickname)) return;
+    const rating = numberOrNaN(a.new_rating);
+    if (!(a.nickname in history)) return;
     if (typeof a.applied_date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(a.applied_date)) return;
     if (applyUntil && a.applied_date > applyUntil) return;
-    if (a.new_rating === null || a.new_rating === "" || !Number.isFinite(rating)) return;
+    if (!Number.isFinite(rating)) return;
     if (!adjByDate.has(a.applied_date)) adjByDate.set(a.applied_date, []);
     adjByDate.get(a.applied_date).push({ nickname: a.nickname, rating, reset: a.reason === "monthly_reset" });
   });
@@ -229,7 +225,7 @@ function computeRatings(matches, players, adjustments, settingsMap, groups, opti
 
     /* 3. Snapshot every rated player */
     current.forEach((rating, nick) => {
-      const series = history[nick] ?? (history[nick] = []);
+      const series = history[nick];
       const start = starts.get(nick);
       if (start) series.push({ date, rating: round2(start.rating), start: true, reset: start.reset });
       series.push({ date, rating: round2(rating), games: games.get(nick) ?? 0 });
@@ -237,16 +233,15 @@ function computeRatings(matches, players, adjustments, settingsMap, groups, opti
   }
 
   /* Build final sorted leaderboard */
+  /* The group comes from the unrounded rating, the order from the rounded one. */
   const leaderboard = [...current]
-    .sort(([nameA, ratingA], [nameB, ratingB]) => {
-      const delta = round2(ratingB) - round2(ratingA);
-      return delta || nameA.localeCompare(nameB, "ru");
-    })
-    .map(([nickname, rating], i) => ({
+    .map(([nick, raw]) => ({ nick, rating: round2(raw), raw }))
+    .sort(compareRanking)
+    .map(({ nick, rating, raw }, i) => ({
       rank: i + 1,
-      nickname,
-      rating: round2(rating),
-      group: groupForRating(rating, ratingGroups),
+      nickname: nick,
+      rating,
+      group: groupForRating(raw, ratingGroups),
     }));
 
   return { leaderboard, history, groups: ratingGroups };

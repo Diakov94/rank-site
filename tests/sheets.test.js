@@ -153,6 +153,7 @@ const INDEX_ID = site.SHEETS_INDEX_ID;
 const indexCsv = (...entries) => ['"","Year","Link"', ...entries.map(([year, id]) => `"","${year}","${docUrl(id)}"`)].join("\n");
 const ok = (body) => ({ ok: true, status: 200, text: async () => body });
 const fail = (status) => ({ ok: false, status, text: async () => "<html>error</html>" });
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
 /* Stub for fetch: `index` answers the index doc, `tabs[sheetId][tabName]` a month tab
  * (missing tabs answer 200 with an empty body, as gviz does). Values may be responses,
@@ -206,8 +207,7 @@ test("fetchMatchesFromSheets requests MonYY tabs once per distinct sheet id and 
     const u = new URL(url);
     return `${u.pathname.split("/")[3]}:${u.searchParams.get("sheet")}`;
   });
-  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-  assert.deepEqual(tabs.sort(), [...months.map((m) => `DOC_26:${m}26`), ...months.map((m) => `DOC_27:${m}27`)].sort());
+  assert.deepEqual(tabs.sort(), [...MONTHS.map((m) => `DOC_26:${m}26`), ...MONTHS.map((m) => `DOC_27:${m}27`)].sort());
   assert.equal(stub.requests.length, 1 + 24);
   assert.match(stub.requests[0], new RegExp(`/spreadsheets/d/${INDEX_ID}/gviz/tq\\?tqx=out:csv$`));
 });
@@ -231,8 +231,7 @@ test("fetchMatchesFromSheets loads all years' tabs in parallel", async () => {
     inFlight++; maxInFlight = Math.max(maxInFlight, inFlight);
     return new Promise((resolve) => setTimeout(() => { inFlight--; resolve(ok("")); }, 5));
   };
-  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-  const tabsFor = (yy) => Object.fromEntries(months.map((m) => [m + yy, slow]));
+  const tabsFor = (yy) => Object.fromEntries(MONTHS.map((m) => [m + yy, slow]));
   const stub = sheetsFetch({
     index: ok(indexCsv([2025, "DOC_25"], [2026, "DOC_26"])),
     tabs: { DOC_25: tabsFor("25"), DOC_26: tabsFor("26") },

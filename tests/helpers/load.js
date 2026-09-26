@@ -44,10 +44,13 @@ function loadSite(options = {}) {
   });
 }
 
+/* A console for loadSite that drops everything the scripts print. */
+const silentConsole = { log() {}, warn() {}, error() {} };
+
 /* Values created inside the context have that realm's prototypes, which
  * assert.deepStrictEqual treats as different. Copy them into plain local values. */
 function plain(value) {
   return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
 }
 
-module.exports = { loadSite, plain, ROOT };
+module.exports = { loadSite, plain, silentConsole, ROOT };

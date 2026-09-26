@@ -4,8 +4,8 @@
  * ============================================================ */
 "use strict";
 
-/* Uses SUPABASE, ADMIN_SESSION_KEY and the helpers from common.js, and buildRatings /
- * sbFetchAll from engine.js. */
+/* Uses SUPABASE, ADMIN_SESSION_KEY and the helpers from common.js, MONTH_ABBR from sheets.js,
+ * and buildRatings / sbFetchAll from engine.js. */
 
 /* ================== CONFIG ================== */
 const CONFIG = Object.freeze({
@@ -62,12 +62,12 @@ const state = {
   players: [],            // [{ nick, series, ends }] — ends = the series without start-of-day entries
   hiddenNicks: new Set(),
   groups: [],             // normalized rating groups from buildRatings()
-  selected: null,
+  selected: null,         // a state.globalRows entry
   deepLinkNick: null,     // ?player= as it was when the page opened
   dateFrom: "",
   dateTo:   "",
   rangeIsDefault: true,   // false once the viewer picks dates; the default follows new data
-  dataSpan: { first: "", last: "" },
+  lastDataDate: "",       // latest date in any player's history
   globalRows: [],
   globalRankByNick: new Map(),
   rankCache: new Map(),   // date -> Map(nick -> rank among visible players)
@@ -76,17 +76,16 @@ const state = {
   weekNick: null,
   loading: false,
   loadedAt: 0,            // Date.now() of the last successful load
+  refreshTimer: 0,
   chartRAF: 0,
   chartAnimating: false,
   chartSeries: [],
   chartDims: null,
   chartHoverIdx: null,
   compareNick: null,
-  compareOpener: null,
+  compareReturnNick: null, // whose "vs" button gets focus back when the compare modal closes
 };
 
-/* Leaderboard order: rating desc, then nick as nick.localeCompare(other, "ru") would order it. */
-const compareNicks = new Intl.Collator("ru").compare;
 const hoverQuery = window.matchMedia("(hover: hover)");
 
 /* ================== INIT ================== */
@@ -149,11 +148,7 @@ async function init() {
 
   await loadData({ initial: true });
 
-  // Auto-refresh every 10 minutes while the tab is visible — re-read from Google Sheets.
-  // A tab that comes back after a longer absence refreshes right away.
-  setInterval(() => {
-    if (document.visibilityState === "visible") loadData();
-  }, CONFIG.REFRESH_MS);
+  // A tab that comes back with stale data refreshes right away (see scheduleRefresh).
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible" && Date.now() - state.loadedAt > CONFIG.REFRESH_MS) loadData();
   });
@@ -211,7 +206,18 @@ async function loadData({ initial = false } = {}) {
   } finally {
     state.loading = false;
     setLoading(false, initial);
+    scheduleRefresh();
   }
+}
+
+/* Auto-refresh: one timer, re-armed after every load (success or failure, the Refresh button
+ * included). It loads only while the tab is visible; a hidden tab catches up on its
+ * visibilitychange instead, so returning to the tab never loads twice. */
+function scheduleRefresh() {
+  clearTimeout(state.refreshTimer);
+  state.refreshTimer = setTimeout(() => {
+    if (document.visibilityState === "visible") loadData();
+  }, CONFIG.REFRESH_MS);
 }
 
 function applyData({ leaderboard, history, groups }, hiddenRows, achievements, playerAchievements) {
@@ -219,9 +225,10 @@ function applyData({ leaderboard, history, groups }, hiddenRows, achievements, p
 
   state.groups = groups;
   state.hiddenNicks = new Set(hiddenRows.map((r) => r.nick));
+  // The engine's history is date-ordered, with each start entry right before its day's end entry.
   state.players = leaderboard.map((p) => {
-    const series = (history[p.nickname] ?? []).slice().sort((a, b) => a.date.localeCompare(b.date));
-    return { nick: p.nickname, series, ends: series.filter((e) => !e.start) };
+    const series = history[p.nickname] ?? [];
+    return { nick: p.nickname, series, ends: endEntries(series) };
   });
 
   // Achievements are optional: on failure keep what the previous load had.
@@ -250,11 +257,7 @@ function applyData({ leaderboard, history, groups }, hiddenRows, achievements, p
 }
 
 function setLoading(isLoading, initial) {
-  if (initial) {
-    const overlay = document.getElementById("loadingOverlay");
-    if (overlay) overlay.classList.toggle("hidden", !isLoading);
-    document.documentElement.style.overflow = isLoading ? "hidden" : "";
-  }
+  if (initial) toggleLoadingOverlay("loadingOverlay", isLoading);
   if (!els.refresh) return;
   els.refresh.disabled = isLoading;
   els.refresh.textContent = isLoading ? "Loading…" : "Refresh";
@@ -276,7 +279,7 @@ function updateDateRange() {
     if (a && (!first || a < first)) first = a;
     if (b && b > last) last = b;
   }
-  state.dataSpan = { first, last };
+  state.lastDataDate = last;
   for (const input of [els.dateFrom, els.dateTo]) {
     if (!input) continue;
     input.min = first;
@@ -286,7 +289,7 @@ function updateDateRange() {
 }
 
 function applyDefaultRange() {
-  const { last } = state.dataSpan;
+  const last = state.lastDataDate;
   state.dateFrom = last ? shiftIsoDate(last, -6) : "";
   state.dateTo   = last;
   if (els.dateFrom) els.dateFrom.value = state.dateFrom;
@@ -294,9 +297,6 @@ function applyDefaultRange() {
 }
 
 /* ================== RANKING ================== */
-function compareRanking(a, b) {
-  return (b.rating ?? -Infinity) - (a.rating ?? -Infinity) || compareNicks(a.nick, b.nick);
-}
 
 /* Runs once per data load; the table, search and history only read its results. */
 function buildGlobalRanking() {
@@ -355,10 +355,7 @@ function renderWeekBanner() {
   const best = candidates.reduce((a, b) => (b.delta7 > a.delta7 ? b : a));
   state.weekNick = best.nick;
 
-  if (els.weekAvatar.dataset.nick !== best.nick) {
-    els.weekAvatar.dataset.nick = best.nick;
-    setAvatar(els.weekAvatar, best.nick);
-  }
+  setAvatarUnlessShown(els.weekAvatar, best.nick);
   els.weekNick.textContent = best.nick;
   els.weekDelta.textContent = `${formatDelta(best.delta7)} pts this week`;
   els.weekRating.textContent = `Rating: ${fmt(best.rating)}`;
@@ -415,7 +412,7 @@ function renderTable() {
       `;
       tr.querySelector(".cmp-btn").addEventListener("click", (e) => {
         e.stopPropagation();
-        onCompareClick(p.nick, e.currentTarget);
+        onCompareClick(p.nick);
       });
       tr.addEventListener("click", () => selectPlayer(p, { user: true, scroll: true }));
       tr.addEventListener("keydown", (e) => {
@@ -433,10 +430,15 @@ function renderTable() {
   els.tbody.replaceChildren(frag);
 
   if (focusNick != null) {
-    const tr = [...els.tbody.rows].find((r) => r.dataset.nick === focusNick);
+    const tr = rowFor(focusNick);
     (focusCmp ? tr?.querySelector(".cmp-btn") : tr)?.focus({ preventScroll: true });
   }
   return filtered;
+}
+
+/* The rendered leaderboard row of `nick`, if the current filter shows it. */
+function rowFor(nick) {
+  return [...(els.tbody?.rows ?? [])].find((r) => r.dataset.nick === nick);
 }
 
 /* ================== SELECT PLAYER ================== */
@@ -458,12 +460,10 @@ function renderProfile(animate = true) {
   if (!p) return;
 
   if (els.profileTitle) els.profileTitle.textContent = p.nick;
-
-  const lastRating = p.series.at(-1)?.rating ?? null;
-  if (els.currentRating) els.currentRating.textContent = fmt(lastRating);
+  if (els.currentRating) els.currentRating.textContent = fmt(p.rating);
 
   setPlayerPhoto(p.nick);
-  setPlayerGroup(lastRating);
+  setPlayerGroup(p.rating);
   renderAchievements(p.nick);
 
   renderHistory(p);
@@ -481,13 +481,18 @@ function scrollToProfile() {
 }
 
 /* ================== PHOTO + GROUP ================== */
+/* Same player as before (a refresh): keep the loaded image instead of requesting it again. */
+function setAvatarUnlessShown(img, nick, size) {
+  if (img.dataset.nick === nick) return;
+  img.dataset.nick = nick;
+  setAvatar(img, nick, size);
+}
+
 function setPlayerPhoto(nick) {
   if (!els.playerPhoto) return;
   if (els.photoNick) els.photoNick.textContent = nick;
-  if (els.playerPhoto.dataset.nick === nick) return; // same player (refresh): keep the loaded image
-  els.playerPhoto.dataset.nick = nick;
   els.playerPhoto.alt = `Photo of ${nick}`;
-  setAvatar(els.playerPhoto, nick, 512);
+  setAvatarUnlessShown(els.playerPhoto, nick, 512);
 }
 
 function setPlayerGroup(rating) {
@@ -534,19 +539,13 @@ function hideMiniCard() {
 }
 
 /* ================== COMPARE ================== */
-function onCompareClick(nick, button) {
-  if (state.compareNick === nick) {
-    state.compareNick = null;
-  } else if (state.compareNick) {
-    const n1 = state.compareNick;
-    state.compareNick = null;
-    markCompareButtons();
-    openCompareModal(n1, nick, button);
-    return;
-  } else {
-    state.compareNick = nick;
-  }
+/* The first "vs" click picks a player, a click on the same one clears the pick, and a click on
+ * another opens the comparison. */
+function onCompareClick(nick) {
+  const first = state.compareNick;
+  state.compareNick = first || first === nick ? null : nick;
   markCompareButtons();
+  if (first && first !== nick) openCompareModal(first, nick);
 }
 
 /* Updates the "vs" buttons in place, so the button keeps keyboard focus. */
@@ -556,19 +555,20 @@ function markCompareButtons() {
   });
 }
 
-/* Games counted in the latest month of the series (end-of-day entries only). */
-function gamesThisMonth(series) {
-  const last = series.at(-1);
+/* Games counted in the latest month of a player's end-of-day entries. */
+function gamesThisMonth(ends) {
+  const last = ends.at(-1);
   if (!last) return null;
   const month = last.date.slice(0, 7);
   let games = 0;
-  for (let i = series.length - 1; i >= 0 && series[i].date.slice(0, 7) === month; i--) {
-    if (!series[i].start) games += Number(series[i].games) || 0;
+  for (let i = ends.length - 1; i >= 0 && ends[i].date.slice(0, 7) === month; i--) {
+    games += Number(ends[i].games) || 0;
   }
   return games;
 }
 
-function openCompareModal(nick1, nick2, opener) {
+/* Closing returns focus to nick2's "vs" button, the click that opened the modal. */
+function openCompareModal(nick1, nick2) {
   if (!els.compareModal || !els.compareGrid) return;
 
   const pair = [nick1, nick2].map((nick) => state.globalRows.find((p) => p.nick === nick));
@@ -606,18 +606,18 @@ function openCompareModal(nick1, nick2, opener) {
         </div>
         <div class="compare-stat">
           <div class="compare-stat-label">Group</div>
-          <div class="compare-stat-val" style="font-size:14px;color:${safeColor(g.color)}">${escapeHtml(g.name)}</div>
+          <div class="compare-stat-val" style="font-size:14px;color:${g.color}">${escapeHtml(g.name)}</div>
         </div>
         <div class="compare-stat">
           <div class="compare-stat-label">Games this month</div>
-          <div class="compare-stat-val">${gamesThisMonth(p.series) ?? "—"}</div>
+          <div class="compare-stat-val">${gamesThisMonth(p.ends) ?? "—"}</div>
         </div>
       </div>`;
   }).join("");
 
   els.compareGrid.querySelectorAll(".compare-col-avatar").forEach((img, i) => setAvatar(img, pair[i].nick));
 
-  state.compareOpener = opener ?? document.activeElement;
+  state.compareReturnNick = nick2;
   els.compareModal.style.display = "flex";
   els.compareClose?.focus();
 }
@@ -626,15 +626,9 @@ function closeCompareModal() {
   if (!els.compareModal || els.compareModal.style.display === "none") return;
   els.compareModal.style.display = "none";
 
-  // Return focus to the "vs" button that opened the modal (found again if the table re-rendered).
-  const opener = state.compareOpener;
-  state.compareOpener = null;
-  if (opener?.isConnected) { opener.focus(); return; }
-  const nick = opener?.dataset?.nick;
-  if (nick == null) return;
-  for (const b of els.tbody?.querySelectorAll(".cmp-btn") ?? []) {
-    if (b.dataset.nick === nick) { b.focus(); return; }
-  }
+  // Looked up by nick, so it also works after a refresh re-rendered the table.
+  rowFor(state.compareReturnNick)?.querySelector(".cmp-btn")?.focus();
+  state.compareReturnNick = null;
 }
 
 /* ================== ACHIEVEMENTS ================== */
@@ -679,14 +673,12 @@ function renderHistory(p) {
   if (!els.history) return;
   els.history.innerHTML = "";
 
-  const from = state.dateFrom, to = state.dateTo;
+  // A start entry always comes right before its day's end entry.
   const rows = [];
   let prevEnd = null, start = null;
   for (const entry of p.series) {
     if (entry.start) { start = entry; continue; }
-    if ((!from || entry.date >= from) && (!to || entry.date <= to)) {
-      rows.push({ end: entry, start: start?.date === entry.date ? start : null, prev: prevEnd });
-    }
+    if (inRange(entry.date, state.dateFrom, state.dateTo)) rows.push({ end: entry, start, prev: prevEnd });
     prevEnd = entry;
     start = null;
   }
@@ -844,7 +836,6 @@ function drawChartFrame(series, dims, opts = {}) {
   });
 
   // Month boundary markers — gray band from final rank downward + label
-  const MONTH_NAMES = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
   segs.slice(0, -1).forEach(([, e]) => {
     const x1 = xAt(e);
     const x2 = xAt(e + 1);
@@ -869,7 +860,7 @@ function drawChartFrame(series, dims, opts = {}) {
 
     // New month label — just above the top edge of the band
     const nextDate = series[e + 1].date; // "YYYY-MM-DD"
-    const label = MONTH_NAMES[Number(nextDate.slice(5, 7)) - 1] + " " + nextDate.slice(0, 4);
+    const label = MONTH_ABBR[Number(nextDate.slice(5, 7)) - 1] + " " + nextDate.slice(0, 4);
     ctx.fillStyle = "rgba(255,255,255,0.50)";
     ctx.font = "bold 10px ui-sans-serif, system-ui, sans-serif";
     ctx.textAlign = "center";
@@ -1021,8 +1012,8 @@ function applyChartHover(idx) {
     els.chartTip.innerHTML =
       `<strong>${fmt(point.rating)}</strong>` +
       `<span>${escapeHtml(point.date)}</span>`;
-    // Position relative to .chartWrap (canvas has padding inside wrap = 8px)
-    const offset = 8; // matches .chartWrap padding
+    // Position relative to .chartWrap: the canvas sits inside its padding
+    const offset = 8; // .chartWrap padding
     els.chartTip.style.left = (px + offset) + "px";
     els.chartTip.style.top  = (py + offset) + "px";
     els.chartTip.hidden = false;
@@ -1034,13 +1025,13 @@ function hideChartTip() {
 }
 
 /* ================== HELPERS ================== */
+/* An empty bound is open. */
+function inRange(date, from, to) {
+  return (!from || date >= from) && (!to || date <= to);
+}
+
 function sliceByRange(series, from, to) {
-  if (!series.length) return series;
-  return series.filter((p) => {
-    if (from && p.date < from) return false;
-    if (to   && p.date > to)   return false;
-    return true;
-  });
+  return series.filter((p) => inRange(p.date, from, to));
 }
 
 function fmt(num) {

@@ -23,9 +23,18 @@ function sbHeaders(token, extra) {
   return { apikey: SUPABASE.KEY, Authorization: `Bearer ${token || SUPABASE.KEY}`, ...extra };
 }
 
-/* ================== AVATARS ================== */
+/* ================== STORAGE / AVATARS ================== */
+function storagePublicUrl(bucket, key) {
+  return `${SUPABASE.URL}/storage/v1/object/public/${bucket}/${key}`;
+}
+
+/* Object key of a player's avatar in the avatar bucket. */
+function avatarKey(nick) {
+  return `${encodeURIComponent(nick)}.png`;
+}
+
 function avatarUrl(nick) {
-  return `${SUPABASE.URL}/storage/v1/object/public/${SUPABASE.AVATAR_BUCKET}/${encodeURIComponent(nick)}.png`;
+  return storagePublicUrl(SUPABASE.AVATAR_BUCKET, avatarKey(nick));
 }
 
 function initialsAvatarUrl(nick, size = 64) {
@@ -64,6 +73,17 @@ function safeColor(value, fallback = "#8a94a6") {
   return /^#[0-9a-f]{3,8}$/i.test(color) ? color : fallback;
 }
 
+/* Number(value), except that null, undefined and "" are NaN rather than 0. */
+function numberOrNaN(value) {
+  return value === null || value === undefined || value === "" ? NaN : Number(value);
+}
+
+/* Shows or hides a full-screen loading overlay and locks page scrolling meanwhile. */
+function toggleLoadingOverlay(id, on) {
+  document.getElementById(id)?.classList.toggle("hidden", !on);
+  document.documentElement.style.overflow = on ? "hidden" : "";
+}
+
 function debounce(fn, ms) {
   let t = 0;
   return (...args) => {
@@ -87,6 +107,19 @@ function shiftIsoDate(iso, days) {
 }
 
 /* ================== RATING HELPERS ================== */
+/* Leaderboard order for { nick, rating } rows: rating descending, then nickname in
+ * Russian collation. The engine and the public page's history ranks both use it. */
+const compareNicks = new Intl.Collator("ru").compare;
+
+function compareRanking(a, b) {
+  return (b.rating ?? -Infinity) - (a.rating ?? -Infinity) || compareNicks(a.nick, b.nick);
+}
+
+/* A history series without its start-of-day entries: one entry per day. */
+function endEntries(series) {
+  return series.filter((e) => !e.start);
+}
+
 /* Groups are sorted by `min` descending (see normalizeGroups in engine.js). */
 function groupForRating(rating, groups) {
   const lowest = groups[groups.length - 1];

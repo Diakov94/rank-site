@@ -453,7 +453,6 @@ tr:not(:hover):not(:focus-visible) .cmp-btn:not(.selected):not(:focus-visible) {
   box-shadow: 0 8px 22px rgba(0,0,0,0.45);
   animation: fadeIn 250ms var(--ease) both;
 }
-.load-notice[hidden] { display: none; }
 
 /* ========== Mobile ========== */
 @media (max-width: 768px) {

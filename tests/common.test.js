@@ -1,9 +1,9 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { loadSite } = require("./helpers/load.js");
+const { loadSite, silentConsole } = require("./helpers/load.js");
 
-const site = loadSite({ console: { log() {}, warn() {}, error() {} } });
+const site = loadSite({ console: silentConsole });
 const { monthDelta, shiftIsoDate, localIsoDate, safeUrl, safeColor, escapeHtml, groupForRating } = site;
 
 const end = (date, rating) => ({ date, rating, games: 1 });

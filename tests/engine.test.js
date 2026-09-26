@@ -1,9 +1,9 @@
 "use strict";
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { loadSite, plain } = require("./helpers/load.js");
+const { loadSite, plain, silentConsole } = require("./helpers/load.js");
 
-const site = loadSite({ console: { log() {}, warn() {}, error() {} } });
+const site = loadSite({ console: silentConsole });
 const { computeRatings, normalizeGroups, groupForRating, monthDelta } = site;
 
 /* Pro: coef 1 from 1100, Mid: coef 1.5 from 1000, Rookie: coef 2 below. */
@@ -463,7 +463,7 @@ test("loadEngineData requests every table in a deterministic order and pages pas
     settings: [{ key: "WinMin", value: "2" }],
     rating_groups: GROUPS,
   });
-  const s = loadSite({ console: { log() {}, warn() {} }, fetch: stub.fetch });
+  const s = loadSite({ console: silentConsole, fetch: stub.fetch });
   const data = await s.loadEngineData();
   assert.equal(data.players.length, 1005);
   assert.deepEqual(plain(data.settingsMap), { WinMin: "2" });
@@ -485,11 +485,11 @@ test("loadEngineData requests every table in a deterministic order and pages pas
 
 test("buildRatings returns leaderboard, history and groups; a failed table rejects", async () => {
   const tables = { player_config: roster({ A: 1000 }), rating_groups: GROUPS };
-  const s = loadSite({ console: { log() {}, warn() {} }, fetch: supabaseFetch(tables).fetch });
+  const s = loadSite({ console: silentConsole, fetch: supabaseFetch(tables).fetch });
   const result = await s.buildRatings();
   assert.deepEqual(plain(result.leaderboard).map((x) => [x.nickname, x.rating, x.group.name]), [["A", 1000, "Mid"]]);
   assert.deepEqual(Object.keys(result).sort(), ["groups", "history", "leaderboard"]);
-  const broken = loadSite({ console: { log() {}, warn() {} }, fetch: supabaseFetch(tables, { failTable: "settings" }).fetch });
+  const broken = loadSite({ console: silentConsole, fetch: supabaseFetch(tables, { failTable: "settings" }).fetch });
   await assert.rejects(broken.buildRatings(), /Supabase error: 503 settings\?/);
 });
 
@@ -499,6 +499,6 @@ test("buildRatings rejects when the Google Sheets index cannot be loaded", async
   const sheetsDown = async (url, init) => (new URL(url).hostname === "docs.google.com"
     ? { ok: false, status: 500, text: async () => "" }
     : fetch(url, init));
-  const s = loadSite({ console: { log() {}, warn() {} }, fetch: sheetsDown });
+  const s = loadSite({ console: silentConsole, fetch: sheetsDown });
   await assert.rejects(s.buildRatings(), /Sheets: failed to load index: HTTP 500/);
 });

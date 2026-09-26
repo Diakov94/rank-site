@@ -14,7 +14,6 @@ const st = {
   playerAchievements: {},
   openPickerNick: null,
   currentTab: "players",
-  adminEmail: "",
   session: null,       // { access_token, refresh_token, expires_at, email }
   groups: [],          // normalized rating groups from the engine, sorted by min desc
   loadErrors: {},      // read failures of loadAdminData, by source
@@ -64,15 +63,18 @@ function readStoredSession() {
 
 function storeSession(s) {
   st.session = s;
-  st.adminEmail = s.email || "";
   try { localStorage.setItem(ADMIN_SESSION_KEY, JSON.stringify(s)); }
   catch (e) { console.warn("Could not store the admin session:", e); }
 }
 
 function clearSession() {
   st.session = null;
-  st.adminEmail = "";
   try { localStorage.removeItem(ADMIN_SESSION_KEY); } catch (e) { /* storage unavailable */ }
+}
+
+/* The logged-in admin's email, or null without a session. */
+function adminEmail() {
+  return (st.session && st.session.email) || null;
 }
 
 /* A valid access token, refreshed first when it expires within a minute. */
@@ -80,12 +82,20 @@ async function getAccessToken() {
   if (!st.session) throw new Error("Not logged in.");
   /* Another tab may already have refreshed (and so rotated) the session. */
   var stored = readStoredSession();
-  if (stored && Number(stored.expires_at) > Number(st.session.expires_at)) {
-    st.session = stored;
-    st.adminEmail = stored.email || "";
-  }
+  if (stored && Number(stored.expires_at) > Number(st.session.expires_at)) st.session = stored;
   if (!(Number(st.session.expires_at) - 60 > Math.floor(Date.now() / 1000))) return refreshSession();
   return st.session.access_token;
+}
+
+/* POST /auth/v1/token for `grantType`; data is the parsed JSON body, or null. */
+async function requestAuthToken(grantType, payload) {
+  var res = await fetch(SUPABASE.URL + "/auth/v1/token?grant_type=" + grantType, {
+    method: "POST",
+    headers: { apikey: SUPABASE.KEY, "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  var data = await res.json().catch(function() { return null; });
+  return { res: res, data: data };
 }
 
 /* Single flight: concurrent callers share one refresh request. When the auth server rejects
@@ -95,12 +105,8 @@ function refreshSession() {
     refreshInFlight = (async function() {
       var current = st.session;
       if (!current) throw new Error("Not logged in.");
-      var res = await fetch(SUPABASE.URL + "/auth/v1/token?grant_type=refresh_token", {
-        method: "POST",
-        headers: { apikey: SUPABASE.KEY, "Content-Type": "application/json" },
-        body: JSON.stringify({ refresh_token: current.refresh_token }),
-      });
-      var data = await res.json().catch(function() { return null; });
+      var auth = await requestAuthToken("refresh_token", { refresh_token: current.refresh_token });
+      var res = auth.res, data = auth.data;
       /* Signed out, logged in again or adopted from another tab meanwhile: keep that state
        * instead of ending or overwriting it with the result for the old session. */
       if (st.session !== current) {
@@ -122,7 +128,7 @@ function refreshSession() {
 function sessionExpired() {
   clearSession();
   closeAchievementPicker();
-  setAdminLoading(false);
+  toggleLoadingOverlay("adminLoadingOverlay", false);
   panelSection.style.display = "none";
   loginSection.style.display = "";
   showLoginError(SESSION_EXPIRED_MSG);
@@ -131,7 +137,9 @@ function sessionExpired() {
 /* ===== Supabase requests =====
  * The one helper for every admin REST and Storage call, reads and writes. `path` starts
  * with /rest/v1/ or /storage/v1/. opts: method, body (sent as JSON), raw + contentType (a
- * file upload), prefer (Prefer header), headers. A 401 refreshes the token once and retries.
+ * file upload), prefer (Prefer header), headers, mustMatch (for deletes and updates that must
+ * hit a row: sends Prefer: return=representation and throws "Not found or not permitted"
+ * when no row comes back). A 401 refreshes the token once and retries.
  * Throws an Error with .status on a non-2xx response; returns parsed JSON, or null for an
  * empty body. */
 async function adminRequest(path, opts) {
@@ -145,7 +153,8 @@ async function adminRequest(path, opts) {
     body = JSON.stringify(opts.body);
     extra["Content-Type"] = "application/json";
   }
-  if (opts.prefer) extra.Prefer = opts.prefer;
+  if (opts.mustMatch) extra.Prefer = "return=representation";
+  else if (opts.prefer) extra.Prefer = opts.prefer;
 
   function send(token) {
     return fetch(SUPABASE.URL + path, { method: opts.method || "GET", headers: sbHeaders(token, extra), body: body });
@@ -161,14 +170,17 @@ async function adminRequest(path, opts) {
   }
   var text = await res.text();
   if (!res.ok) throw Object.assign(new Error("HTTP " + res.status + (text ? ": " + text : "")), { status: res.status });
-  if (!text) return null;
-  try { return JSON.parse(text); } catch (e) { return text; }
+  var result = null;
+  if (text) {
+    try { result = JSON.parse(text); } catch (e) { result = text; }
+  }
+  if (opts.mustMatch && (!Array.isArray(result) || !result.length)) throw new Error("Not found or not permitted");
+  return result;
 }
 
-/* For deletes and updates sent with Prefer: return=representation that must hit a row. */
-function requireRows(rows) {
-  if (!Array.isArray(rows) || !rows.length) throw new Error("Not found or not permitted");
-  return rows;
+/* A .catch handler that rethrows the error with `prefix` before its message. */
+function rethrowAs(prefix) {
+  return function(e) { throw new Error(prefix + e.message); };
 }
 
 /* ===== Auth ===== */
@@ -190,15 +202,8 @@ async function tryLogin() {
   loginBtn.disabled = true;
   loginBtn.textContent = "Checking…";
   try {
-    var res = await fetch(SUPABASE.URL + "/auth/v1/token?grant_type=password", {
-      method: "POST",
-      headers: {
-        "apikey": SUPABASE.KEY,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ email: email, password: password }),
-    });
-    var data = await res.json().catch(function() { return null; });
+    var auth = await requestAuthToken("password", { email: email, password: password });
+    var res = auth.res, data = auth.data;
     if (!res.ok || !data || !data.access_token) {
       showLoginError("Invalid email or password.");
       return;
@@ -211,7 +216,7 @@ async function tryLogin() {
     }
     if (!st.session) return; // the check ended the session
     passwordInput.value = "";
-    writeLog("Logged in", st.adminEmail);
+    writeLog("Logged in", adminEmail());
     enterPanel();
   } catch (e) {
     console.error("Login error:", e);
@@ -254,22 +259,16 @@ function showLoginError(msg) {
 }
 async function logout() {
   if (logoutBtn) logoutBtn.disabled = true;
-  await writeLog("Logged out", st.adminEmail || null);
+  await writeLog("Logged out", adminEmail());
   await endSession();
   location.reload();
 }
 
 /* ===== Panel ===== */
-function setAdminLoading(on) {
-  var ov = document.getElementById("adminLoadingOverlay");
-  if (ov) ov.classList.toggle("hidden", !on);
-  document.documentElement.style.overflow = on ? "hidden" : "";
-}
-
 function enterPanel() {
   loginSection.style.display = "none";
   panelSection.style.display = "block";
-  setTimeout(function() { setAdminLoading(true); }, 0);
+  setTimeout(function() { toggleLoadingOverlay("adminLoadingOverlay", true); }, 0);
   loadAdminData();
 }
 
@@ -285,7 +284,9 @@ async function loadAdminData() {
     st.loadErrors[key] = message + " " + ((result.reason && result.reason.message) || result.reason);
     return true;
   }
-  function rowsOf(result) {
+  /* The rows of a read, or [] when it failed (recorded as above). */
+  function rowsOrEmpty(result, key, message) {
+    if (failed(result, key, message)) return [];
     return Array.isArray(result.value) ? result.value : [];
   }
 
@@ -301,39 +302,36 @@ async function loadAdminData() {
       adminRequest("/rest/v1/player_achievements?select=nick,achievement_id"),
     ]);
 
-    var configPlayers = failed(configRes, "config", "Could not load players:") ? [] : rowsOf(configRes);
+    var configPlayers = rowsOrEmpty(configRes, "config", "Could not load players:");
     var ratingsData = failed(ratingsResult, "engine", "Rating calculation failed (ratings, changes and activity are unavailable):")
       ? null : ratingsResult.value;
 
-    st.hiddenNicks = new Set(failed(hiddenRes, "hidden", "Could not load hidden players (visibility switches may be wrong):")
-      ? [] : rowsOf(hiddenRes).map(function(r) { return r.nick; }));
-    st.achievements = failed(achRes, "achievements", "Could not load achievements:") ? [] : rowsOf(achRes);
+    st.hiddenNicks = new Set(rowsOrEmpty(hiddenRes, "hidden", "Could not load hidden players (visibility switches may be wrong):")
+      .map(function(r) { return r.nick; }));
+    st.achievements = rowsOrEmpty(achRes, "achievements", "Could not load achievements:");
     st.playerAchievements = {};
-    if (!failed(playerAchRes, "playerAchievements", "Could not load badge assignments:")) {
-      rowsOf(playerAchRes).forEach(function(r) {
-        if (!st.playerAchievements[r.nick]) st.playerAchievements[r.nick] = new Set();
-        st.playerAchievements[r.nick].add(r.achievement_id);
-      });
-    }
+    rowsOrEmpty(playerAchRes, "playerAchievements", "Could not load badge assignments:").forEach(function(r) {
+      if (!st.playerAchievements[r.nick]) st.playerAchievements[r.nick] = new Set();
+      st.playerAchievements[r.nick].add(r.achievement_id);
+    });
 
     /* Build rating lookup from engine */
     var ratingByNick = {};
-    var seriesByNick = {};
     if (ratingsData) {
       ratingsData.leaderboard.forEach(function(p) {
         ratingByNick[p.nickname] = p.rating;
       });
-      Object.keys(ratingsData.history).forEach(function(nick) {
-        seriesByNick[nick] = ratingsData.history[nick];
-      });
     }
-    st.groups = ratingsData && Array.isArray(ratingsData.groups) ? ratingsData.groups : [];
+    st.groups = ratingsData ? ratingsData.groups : [];
 
+    /* series: the engine's history entries; ends: the same without start-of-day entries */
     st.players = configPlayers.map(function(p) {
+      var series = (ratingsData && ratingsData.history[p.nickname]) || [];
       return {
         nick: p.nickname,
         rating: ratingByNick[p.nickname] ?? null,
-        series: seriesByNick[p.nickname] ?? [],
+        series: series,
+        ends: endEntries(series),
       };
     });
     sortPlayers();
@@ -344,7 +342,7 @@ async function loadAdminData() {
   } catch (err) {
     playerList.innerHTML = errorHtml("Failed to load data: " + err.message);
   } finally {
-    setAdminLoading(false);
+    toggleLoadingOverlay("adminLoadingOverlay", false);
   }
 }
 
@@ -373,13 +371,8 @@ function errorHtml(message) {
 
 /* A finite number as text, or "" — keeps database values out of markup. */
 function numOrEmpty(value) {
-  var n = Number(value);
-  return value === null || value === undefined || value === "" || !Number.isFinite(n) ? "" : String(n);
-}
-
-/* The rating group of `rating` (st.groups comes from the engine), or null without groups. */
-function groupOf(rating) {
-  return st.groups.length ? groupForRating(rating, st.groups) : null;
+  var n = numberOrNaN(value);
+  return Number.isFinite(n) ? String(n) : "";
 }
 
 /* ===== Tab switching ===== */
@@ -647,16 +640,13 @@ async function saveMonthlyReset() {
   btn.textContent = "Saving…";
 
   try {
-    var inserted;
-    try {
-      inserted = await adminRequest("/rest/v1/rating_adjustments", {
-        method: "POST",
-        body: records,
-        prefer: "return=representation",
-      });
-    } catch (e) {
+    var inserted = await adminRequest("/rest/v1/rating_adjustments", {
+      method: "POST",
+      body: records,
+      prefer: "return=representation",
+    }).catch(function(e) {
       throw new Error(e.message + "\nNothing was deleted; the previously saved reset is unchanged.");
-    }
+    });
     var newIds = (Array.isArray(inserted) ? inserted : [])
       .map(function(r) { return Number(r.id); })
       .filter(function(id) { return Number.isInteger(id); });
@@ -765,10 +755,7 @@ function renderAdjustmentsList(rows) {
 
 async function deleteAdjustment(id) {
   try {
-    requireRows(await adminRequest("/rest/v1/rating_adjustments?id=eq." + id, {
-      method: "DELETE",
-      prefer: "return=representation",
-    }));
+    await adminRequest("/rest/v1/rating_adjustments?id=eq." + id, { method: "DELETE", mustMatch: true });
     writeLog("Adjustment deleted", String(id));
     loadAdjustmentsTab();
   } catch (e) { alert("Error: " + e.message); }
@@ -829,19 +816,18 @@ function renderGroupsTab(groups) {
   var entries = []; // { group, row } in display order
   var frag = document.createDocumentFragment();
   groups.forEach(function(g) {
-    var color = safeColor(g.color);
     var row = document.createElement("div");
     row.className = "group-row";
     row.innerHTML =
       '<label class="group-color-wrap" title="Click to change colour">' +
-        '<span class="group-color-swatch" style="background:' + escapeHtml(color) + ';"></span>' +
-        '<input class="group-color-input" type="color" value="' + escapeHtml(color) + '" />' +
+        '<span class="group-color-swatch" style="background:' + escapeHtml(g.color) + ';"></span>' +
+        '<input class="group-color-input" type="color" value="' + escapeHtml(g.color) + '" />' +
       '</label>' +
       '<input class="group-name-input" type="text" value="' + escapeHtml(g.name) + '" placeholder="Group name" />' +
       '<span class="group-min-label">Min rating:</span>' +
-      '<input class="group-min-input" type="number" value="' + numOrEmpty(g.min) + '" min="0" step="1" />' +
+      '<input class="group-min-input" type="number" value="' + escapeHtml(g.min) + '" min="0" step="1" />' +
       '<span class="group-min-label">Coef:</span>' +
-      '<input class="group-min-input group-coef-input" type="number" value="' + numOrEmpty(g.coef ?? 1) + '" step="0.01" />' +
+      '<input class="group-min-input group-coef-input" type="number" value="' + escapeHtml(g.coef) + '" step="0.01" />' +
       '<button class="btn group-save-btn" type="button" style="font-size:13px;background:var(--accent);color:#0b0f14;font-weight:700;flex-shrink:0;">Save</button>';
 
     // Live-update swatch as colour changes
@@ -873,12 +859,12 @@ async function saveGroup(groupObj, name, minRating, color, coef, rowEl, entries)
   var saveBtn = rowEl.querySelector(".group-save-btn");
   saveBtn.disabled = true; saveBtn.textContent = "Saving…";
   try {
-    var rows = requireRows(await adminRequest("/rest/v1/rating_groups?id=eq." + encodeURIComponent(groupObj.id), {
+    var rows = await adminRequest("/rest/v1/rating_groups?id=eq." + encodeURIComponent(groupObj.id), {
       method: "PATCH",
       body: { name: name, min_rating: minRating, color: color, coef: coef },
-      prefer: "return=representation",
-    }));
-    Object.assign(groupObj, normalizeGroups(rows)[0] || { name: name, min: minRating, color: safeColor(color), coef: coef });
+      mustMatch: true,
+    });
+    Object.assign(groupObj, normalizeGroups(rows)[0]);
 
     rowEl.querySelector(".group-name-input").value = groupObj.name;
     rowEl.querySelector(".group-min-input").value = groupObj.min;
@@ -891,7 +877,7 @@ async function saveGroup(groupObj, name, minRating, color, coef, rowEl, entries)
     if (container && entries.some(function(e, i) { return container.children[i] !== e.row; })) {
       entries.forEach(function(e) { container.appendChild(e.row); });
     }
-    st.groups = normalizeGroups(entries.map(function(e) { return e.group; }));
+    st.groups = entries.map(function(e) { return e.group; });
 
     writeLog("Group updated", groupObj.name + " — min:" + groupObj.min + " color:" + groupObj.color);
     saveBtn.textContent = "✓ Saved";
@@ -1000,21 +986,22 @@ function makeAchCard(ach) {
   return card;
 }
 
+/* Uploads `file` to Storage as bucket/key, replacing an existing object. */
+async function uploadToBucket(bucket, key, file) {
+  return adminRequest("/storage/v1/object/" + bucket + "/" + key, {
+    method: "POST",
+    raw: file,
+    contentType: file.type || "image/png",
+    headers: { "x-upsert": "true" },
+  });
+}
+
 /* Uploads an achievement icon and returns its public URL. */
 async function uploadAchievementIcon(name, file) {
   var slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
   var filename = slug + "_" + Date.now() + ".png";
-  try {
-    await adminRequest("/storage/v1/object/" + SUPABASE.ACH_BUCKET + "/" + filename, {
-      method: "POST",
-      raw: file,
-      contentType: file.type || "image/png",
-      headers: { "x-upsert": "true" },
-    });
-  } catch (err) {
-    throw new Error("Icon upload failed: " + err.message);
-  }
-  return SUPABASE.URL + "/storage/v1/object/public/" + SUPABASE.ACH_BUCKET + "/" + filename;
+  await uploadToBucket(SUPABASE.ACH_BUCKET, filename, file).catch(rethrowAs("Icon upload failed: "));
+  return storagePublicUrl(SUPABASE.ACH_BUCKET, filename);
 }
 
 /* ===== Create achievement ===== */
@@ -1025,16 +1012,11 @@ async function createAchievement(name, url, file) {
   try {
     var iconUrl = await uploadAchievementIcon(name, file);
 
-    var inserted;
-    try {
-      inserted = await adminRequest("/rest/v1/achievements", {
-        method: "POST",
-        body: { name: name, icon_url: iconUrl, url: url || null },
-        prefer: "return=representation",
-      });
-    } catch (err) {
-      throw new Error("DB insert failed: " + err.message);
-    }
+    var inserted = await adminRequest("/rest/v1/achievements", {
+      method: "POST",
+      body: { name: name, icon_url: iconUrl, url: url || null },
+      prefer: "return=representation",
+    }).catch(rethrowAs("DB insert failed: "));
     var newAch = Array.isArray(inserted) ? inserted[0] : inserted;
     st.achievements.push(newAch);
     writeLog("Achievement created", name);
@@ -1047,7 +1029,6 @@ async function createAchievement(name, url, file) {
     document.getElementById("addAchForm").classList.remove("open");
 
     renderAchievementsTab();
-    renderList();
   } catch (err) {
     alert("Error: " + err.message);
   } finally {
@@ -1066,16 +1047,11 @@ async function saveAchievementEdit(id, name, url, file, cardEl) {
     /* Upload new icon if provided */
     if (file) updateData.icon_url = await uploadAchievementIcon(name, file);
 
-    var updated;
-    try {
-      updated = requireRows(await adminRequest("/rest/v1/achievements?id=eq." + encodeURIComponent(id), {
-        method: "PATCH",
-        body: updateData,
-        prefer: "return=representation",
-      }));
-    } catch (err) {
-      throw new Error("Update failed: " + err.message);
-    }
+    var updated = await adminRequest("/rest/v1/achievements?id=eq." + encodeURIComponent(id), {
+      method: "PATCH",
+      body: updateData,
+      mustMatch: true,
+    }).catch(rethrowAs("Update failed: "));
 
     /* Update state */
     var idx = st.achievements.findIndex(function(a) { return a.id === id; });
@@ -1083,7 +1059,6 @@ async function saveAchievementEdit(id, name, url, file, cardEl) {
     writeLog("Achievement edited", name);
 
     renderAchievementsTab();
-    renderList();
   } catch (err) {
     alert("Error: " + err.message);
     saveBtn.disabled = false; saveBtn.textContent = "Save";
@@ -1094,10 +1069,7 @@ async function saveAchievementEdit(id, name, url, file, cardEl) {
 async function deleteAchievement(id, cardEl) {
   if (cardEl) cardEl.style.opacity = "0.4";
   try {
-    requireRows(await adminRequest("/rest/v1/achievements?id=eq." + encodeURIComponent(id), {
-      method: "DELETE",
-      prefer: "return=representation",
-    }));
+    await adminRequest("/rest/v1/achievements?id=eq." + encodeURIComponent(id), { method: "DELETE", mustMatch: true });
     var delName = (st.achievements.find(function(a){return a.id===id;})||{}).name || String(id);
     writeLog("Achievement deleted", delName);
     st.achievements = st.achievements.filter(function(a) { return a.id !== id; });
@@ -1191,14 +1163,18 @@ async function togglePlayerAchievement(nick, achId, assign, checkboxEl) {
   }
 }
 
+/* Shows the player's badge count on their trophy button. */
+function paintTrophy(btn, nick) {
+  var count = st.playerAchievements[nick] ? st.playerAchievements[nick].size : 0;
+  btn.classList.toggle("has-ach", count > 0);
+  btn.title = count > 0 ? "Achievements (" + count + ")" : "Add achievement";
+}
+
 function updateTrophyBtn(nick) {
   var row = playerList.querySelector('[data-nick="' + CSS.escape(nick) + '"]');
   if (!row) return;
   var btn = row.querySelector(".trophy-btn");
-  if (!btn) return;
-  var hasAny = st.playerAchievements[nick] && st.playerAchievements[nick].size > 0;
-  btn.classList.toggle("has-ach", hasAny);
-  btn.title = hasAny ? "Achievements (" + st.playerAchievements[nick].size + ")" : "Add achievement";
+  if (btn) paintTrophy(btn, nick);
 }
 
 /* ===== Avatar URL =====
@@ -1230,16 +1206,9 @@ function renderList() {
 }
 
 function makeRow(p) {
-  var isHidden    = st.hiddenNicks.has(p.nick);
-  var rating      = p.rating != null ? Number(p.rating).toFixed(1) : "—";
-  var checkedAttr = isHidden ? "" : "checked";
-  var labelText   = isHidden ? "Hidden" : "Visible";
-  var achCount    = st.playerAchievements[p.nick] ? st.playerAchievements[p.nick].size : 0;
-  var trophyClass = "trophy-btn" + (achCount > 0 ? " has-ach" : "");
-  var trophyTitle = achCount > 0 ? "Achievements (" + achCount + ")" : "Add achievement";
+  var rating = p.rating != null ? Number(p.rating).toFixed(1) : "—";
 
   var row = document.createElement("div");
-  row.className = "player-row" + (isHidden ? " player-row--hidden" : "");
   row.dataset.nick = p.nick;
   row.innerHTML =
     '<div class="player-row-info">' +
@@ -1251,14 +1220,16 @@ function makeRow(p) {
     '</div>' +
     '<div class="row-actions">' +
       '<label class="upload-btn" title="Upload photo">📷<input class="avatar-file-input" type="file" accept="image/*" style="display:none" /></label>' +
-      '<button class="' + trophyClass + '" type="button" title="' + escapeHtml(trophyTitle) + '">🏆</button>' +
-      '<label class="toggle" title="' + (isHidden ? "Hidden — click to show" : "Visible — click to hide") + '">' +
-        '<input type="checkbox" ' + checkedAttr + ' />' +
+      '<button class="trophy-btn" type="button">🏆</button>' +
+      '<label class="toggle">' +
+        '<input type="checkbox" />' +
         '<span class="toggle-track"><span class="toggle-thumb"></span></span>' +
-        '<span class="toggle-label">' + labelText + '</span>' +
+        '<span class="toggle-label"></span>' +
       '</label>' +
       '<button class="btn delete-player-btn" type="button" title="Delete player" style="font-size:11px;color:#ff7676;padding:3px 8px;">✕</button>' +
     '</div>';
+  paintVisibility(row, !st.hiddenNicks.has(p.nick));
+  paintTrophy(row.querySelector(".trophy-btn"), p.nick);
 
   var img = row.querySelector(".player-row-avatar");
   setAvatar(img, p.nick, 64, avatarSrc(p.nick));
@@ -1285,19 +1256,9 @@ function makeRow(p) {
 
 /* ===== Upload avatar ===== */
 async function uploadAvatar(nick, file, imgEl) {
-  var path = encodeURIComponent(nick) + ".png";
   imgEl.style.opacity = "0.4";
   try {
-    try {
-      await adminRequest("/storage/v1/object/" + SUPABASE.AVATAR_BUCKET + "/" + path, {
-        method: "POST",
-        raw: file,
-        contentType: file.type || "image/png",
-        headers: { "x-upsert": "true" },
-      });
-    } catch (err) {
-      throw new Error("Upload failed: " + err.message);
-    }
+    await uploadToBucket(SUPABASE.AVATAR_BUCKET, avatarKey(nick), file).catch(rethrowAs("Upload failed: "));
     st.avatarVersions[nick] = Date.now();
     setAvatar(imgEl, nick, 64, avatarSrc(nick));
     writeLog("Avatar uploaded", nick);
@@ -1309,9 +1270,8 @@ async function uploadAvatar(nick, file, imgEl) {
 }
 
 /* ===== Toggle visibility ===== */
-/* Shows `visible` on the row (switch, dimming, label, title) and in st.hiddenNicks. */
-function applyVisibility(nick, visible, row) {
-  if (visible) { st.hiddenNicks.delete(nick); } else { st.hiddenNicks.add(nick); }
+/* Shows `visible` on the row: switch, dimming, label, title. */
+function paintVisibility(row, visible) {
   row.className = "player-row" + (visible ? "" : " player-row--hidden");
   var box = row.querySelector(".toggle input");
   var lbl = row.querySelector(".toggle-label");
@@ -1319,6 +1279,12 @@ function applyVisibility(nick, visible, row) {
   if (box) box.checked = visible;
   if (lbl) lbl.textContent = visible ? "Visible" : "Hidden";
   if (tog) tog.title = visible ? "Visible — click to hide" : "Hidden — click to show";
+}
+
+/* Shows `visible` on the row and in st.hiddenNicks. */
+function applyVisibility(nick, visible, row) {
+  if (visible) { st.hiddenNicks.delete(nick); } else { st.hiddenNicks.add(nick); }
+  paintVisibility(row, visible);
   updateStats();
 }
 
@@ -1367,7 +1333,7 @@ async function writeLog(action, details) {
       body: {
         action: action,
         details: details || null,
-        email: st.adminEmail || null,
+        email: adminEmail(),
       },
     });
   } catch (e) { console.warn("Log write failed:", e); }
@@ -1439,7 +1405,7 @@ function exportCSV() {
   visible.forEach(function(p, i) {
     var d7 = monthDelta(p.series, 7);
     var d1 = monthDelta(p.series, 1);
-    var grp = p.rating != null ? groupOf(p.rating) : null;
+    var grp = p.rating != null ? groupForRating(p.rating, st.groups) : null;
     rows.push([
       i + 1, p.nick,
       p.rating != null ? Number(p.rating).toFixed(1) : "—",
@@ -1493,9 +1459,9 @@ function renderDashboard() {
 
   var groupDist = st.groups.map(function(g) {
     var cnt = visiblePlayers.filter(function(p) {
-      return p.rating != null && groupOf(p.rating) === g;
+      return p.rating != null && groupForRating(p.rating, st.groups) === g;
     }).length;
-    return { name: g.name, color: safeColor(g.color), count: cnt };
+    return { name: g.name, color: g.color, count: cnt };
   }).filter(function(g) { return g.count > 0; });
 
   function moverHtml(list, isGain) {
@@ -1630,15 +1596,15 @@ function buildActivityHtml(sortedMonths) {
   }).join('');
 }
 
-/* Per-player activity in a month, from the engine's end-of-day entries: played = games > 0,
- * not played = games === 0. Start-of-day entries (start: true) are not days of their own. */
+/* Per-player activity in a month, from the engine's end-of-day entries (p.ends): played =
+ * games > 0, not played = games === 0. */
 function calcMonthActivity(prefix) {
   return st.players
     .map(function(p) {
       var playedDates = [];
       var zeroDays = 0;
-      (p.series || []).forEach(function(e) {
-        if (e.start || !e.date.startsWith(prefix)) return;
+      p.ends.forEach(function(e) {
+        if (!e.date.startsWith(prefix)) return;
         var games = Number(e.games);
         if (games > 0) playedDates.push(e.date);
         else if (games === 0) zeroDays++;
@@ -1734,13 +1700,11 @@ document.addEventListener("DOMContentLoaded", function() {
 
 /* The old cookie gate is gone; remove its leftover cookies. */
 ["esb_admin", "esb_admin_email"].forEach(function(name) {
-  var present = document.cookie.split("; ").some(function(c) { return c.indexOf(name + "=") === 0; });
-  if (present) document.cookie = name + "=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/";
+  document.cookie = name + "=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/";
 });
 
 st.session = readStoredSession();
 if (st.session) {
-  st.adminEmail = st.session.email || "";
   /* A login submitted while this check was running has already opened the panel. */
   getAccessToken().then(function() {
     if (panelSection.style.display === "none") enterPanel();
@@ -1756,10 +1720,7 @@ if (st.session) {
 async function deletePlayer(nick, rowEl) {
   if (rowEl) rowEl.style.opacity = "0.4";
   try {
-    requireRows(await adminRequest("/rest/v1/player_config?nickname=eq." + encodeURIComponent(nick), {
-      method: "DELETE",
-      prefer: "return=representation",
-    }));
+    await adminRequest("/rest/v1/player_config?nickname=eq." + encodeURIComponent(nick), { method: "DELETE", mustMatch: true });
     writeLog("Player deleted", nick);
     st.players = st.players.filter(function(p) { return p.nick !== nick; });
     if (rowEl) rowEl.remove();
@@ -1794,7 +1755,7 @@ async function addNewPlayer() {
     });
 
     writeLog("Player added", nick + " (rating: " + rating + ")");
-    st.players.push({ nick: nick, rating: rating, series: [] });
+    st.players.push({ nick: nick, rating: rating, series: [], ends: [] });
     sortPlayers();
     renderList();
     showAddMsg("✓ " + nick + " added!", "success");
