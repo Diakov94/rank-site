@@ -559,8 +559,18 @@ select roles_test.logout();
 -- ── Roles and their permissions: super admin only ──────────────────────────
 do $$
 begin
-  perform roles_test.expect('roles.manage is gone: roles are managed by the super admin only',
+  perform roles_test.expect('there is no roles.manage permission: roles are managed by the super admin only',
     not exists (select 1 from public.permissions where key = 'roles.manage'), null);
+end
+$$;
+
+-- ── The column adjustments take effect by ─────────────────────────────────────
+do $$
+begin
+  perform roles_test.expect('rating_adjustments.created_at exists and has a default',
+    exists (select 1 from information_schema.columns
+            where table_schema = 'public' and table_name = 'rating_adjustments'
+              and column_name = 'created_at' and column_default is not null), null);
 end
 $$;
 

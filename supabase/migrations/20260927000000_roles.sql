@@ -129,10 +129,7 @@ insert into public.permissions (key, label, description, sort) values
 on conflict (key) do update
   set label = excluded.label, description = excluded.description, sort = excluded.sort;
 
--- Creating and editing roles is for the super admin only, so it is not a permission that
--- can be handed out. Drop it if an earlier version of this file seeded it (its
--- role_permissions rows go with it).
-delete from public.permissions where key = 'roles.manage';
+-- Creating and editing roles is for the super admin only, so it is not in this list.
 
 insert into public.roles (name, description, is_super)
 select 'Super admin', 'Every permission. This role cannot be edited or deleted.', true
@@ -486,6 +483,22 @@ create policy esb_user_roles_delete on public.user_roles
     and user_id <> (select auth.uid())
     and private.can_grant_role(role_id)
   );
+
+-- ── Column the site relies on: rating_adjustments.created_at ────────────────
+-- When the row was saved. The site applies a manual adjustment dated the current work
+-- day at that moment (adjustmentMoment in js/common.js). Added without a default first,
+-- so rows saved before it stay null (start of their day) instead of getting the time
+-- this file runs; new rows get now().
+do $$
+begin
+  if to_regclass('public.rating_adjustments') is null then
+    raise warning 'public.rating_adjustments does not exist, skipped; run this file again after creating it';
+    return;
+  end if;
+  alter table public.rating_adjustments add column if not exists created_at timestamptz;
+  alter table public.rating_adjustments alter column created_at set default now();
+end
+$$;
 
 -- ── Policies: site tables ───────────────────────────────────────────────────
 -- Anyone reads (esb_public_read, as in the first migration). Writes need the

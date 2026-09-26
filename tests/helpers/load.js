@@ -6,16 +6,13 @@ const path = require("node:path");
 const vm = require("node:vm");
 
 const ROOT = path.resolve(__dirname, "..", "..");
-const DEFAULT_FILES = ["js/common.js", "js/sheets.js", "js/engine.js"];
+const FILES = ["js/common.js", "js/sheets.js", "js/engine.js"];
 const IDENTIFIER = /^[A-Za-z_$][\w$]*$/;
 
 /**
- * loadSite({ fetch, console, files }) -> proxy of the scripts' globals.
+ * loadSite({ fetch, console }) -> proxy of the scripts' globals.
  * Top-level const/let are not properties of the context's global object, so each name is
- * evaluated inside the context. Extras on the returned object:
- *   site.$context    the vm context
- *   site.$setFetch   replaces the global fetch the scripts call
- *   site.$eval(code) runs code in the context
+ * evaluated inside the context. site.$eval(code) runs code in the context.
  */
 function loadSite(options = {}) {
   const context = vm.createContext({
@@ -25,16 +22,12 @@ function loadSite(options = {}) {
     clearTimeout,
     fetch: options.fetch ?? (() => Promise.reject(new Error("fetch is not stubbed"))),
   });
-  for (const file of options.files ?? DEFAULT_FILES) {
+  for (const file of FILES) {
     const code = fs.readFileSync(path.join(ROOT, file), "utf8");
     vm.runInContext(code, context, { filename: file });
   }
 
-  const extras = {
-    $context: context,
-    $setFetch: (fn) => { context.fetch = fn; },
-    $eval: (code) => vm.runInContext(code, context),
-  };
+  const extras = { $eval: (code) => vm.runInContext(code, context) };
   return new Proxy(extras, {
     get(target, name) {
       if (name in target) return target[name];

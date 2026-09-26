@@ -153,7 +153,7 @@ A player's profile shows two ratings:
 | `js/app.js` | Public page UI: leaderboard, search, profile, chart, compare, achievements. Reloads the data every 10 minutes while the tab is visible. |
 | `js/admin.js` | Admin panel UI. |
 | `icons/favicon.svg` | Favicon. |
-| `supabase/functions/esb-sync/index.ts` | Edge function that copies matches from the ESportsBattle API (see below). |
+| `supabase/functions/esb-sync/` | Edge function that copies matches from the ESportsBattle API: `sync.js` (the logic) and `index.ts` (Deno wiring). See below. |
 | `supabase/functions/admin-users/` | Edge function behind the admin panel's Users tab: `handler.js` (the logic) and `index.ts` (Deno wiring). See below. |
 | `supabase/migrations/` | SQL for Row Level Security, roles and permissions. |
 | `supabase/tests/roles_test.sql` | SQL self-test of the roles rules; it rolls itself back. |
@@ -172,7 +172,7 @@ top-level name must be declared in only one of the files loaded by a page.
 | Table | Columns the code uses | Read by | Written by |
 | --- | --- | --- | --- |
 | `player_config` | `nickname`, `initial_rating`, `suspended_from`, `suspended_to`, `active` | engine, admin | admin (add, delete players) |
-| `rating_adjustments` | `id`, `nickname`, `new_rating`, `applied_date`, `reason`, `created_at` (set by the database on insert) | engine, admin | admin (Monthly Reset, Adjustments tabs) |
+| `rating_adjustments` | `id`, `nickname`, `new_rating`, `applied_date`, `reason`, `created_at` (set by the database on insert; the roles migration adds it, with default `now()`, where it is missing) | engine, admin | admin (Monthly Reset, Adjustments tabs) |
 | `settings` | `key` (unique), `value` | engine, admin, esb-sync (`esb_sync_cursor`) | admin (Formula tab); esb-sync (`esb_sync_cursor` row) |
 | `rating_groups` | `id`, `name`, `min_rating`, `color`, `coef` | engine, admin | admin (Groups tab edits existing rows) |
 | `hidden_players` | `nick` | public page, admin | admin |
@@ -294,11 +294,9 @@ buckets are left to their own policies.
   access token with all of its own reads and writes (the shared `buildRatings()` reads use
   the publishable key).
 - After login it calls `POST /rest/v1/rpc/my_access`. An account without a role gets "This
-  account has no role in the admin panel." and is signed out. If the function does not
-  exist yet (HTTP 404, PostgREST code `PGRST202`: only the first migration is applied), it
-  falls back to `rpc/is_admin`: true means a super admin with every permission, false
-  means not an admin. Any other failure gives "Could not verify admin access. Try again."
-  and signs out.
+  account has no role in the admin panel." and is signed out. Any failure, including a
+  missing `my_access` because the roles migration is not applied, gives "Could not verify
+  admin access. Try again." and signs out.
 - The header shows `<email> · <role name>`, and the panel shows only what the role allows:
 
   | Tab | Shown with | Controls inside |
@@ -343,13 +341,12 @@ then check it (the SQL self-test is optional). The notes below explain how the p
   The gateway's own JWT check rejects valid sign-ins on projects with Supabase's new API
   keys, as this one has, and the function verifies every caller's token itself with
   `auth.getUser` (see [admin-users edge function](#admin-users-edge-function)).
-- **Front-end versions.** The new admin panel also works while only the first migration
-  is applied: every admin is then treated as a super admin, and the Users and Roles tabs
-  say they need the roles migration. The admin panel from before the first migration
-  writes with the publishable key, so its writes stop working as soon as that migration
-  runs, while the public page keeps working. The one built for the first migration still
-  signs in after the roles migration, because `is_admin()` now means "has a role", but
-  its writes succeed only where the role allows.
+- **Front-end versions.** The new admin panel needs the roles migration: without it,
+  sign-in ends with "Could not verify admin access. Try again." The admin panel from
+  before the first migration writes with the publishable key, so its writes stop working
+  as soon as that migration runs, while the public page keeps working. The one built for
+  the first migration still signs in after the roles migration, because `is_admin()` now
+  means "has a role", but its writes succeed only where the role allows.
 - **SQL self-test** (`supabase/tests/roles_test.sql`, optional): paste it into the SQL
   editor and run it, or `psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f
   supabase/tests/roles_test.sql`. It runs in one transaction that it rolls back, with
@@ -383,7 +380,8 @@ npm test
 Requires Node.js 20 or newer and has no dependencies to install. The tests load the
 site's scripts into one `vm` context the way the pages do (`tests/helpers/load.js`) and
 stub `fetch`. `tests/admin-users.test.js` imports the admin-users function's
-`handler.js` and runs it with fake dependencies. The CI workflow
+`handler.js` and runs it with fake dependencies, and `tests/esb-sync.test.js` runs the
+esb-sync function's `sync.js` against a fake ESB API and `matches` table. The CI workflow
 `.github/workflows/test.yml` runs `npm test` on every push and pull request.
 
 The database rules (RLS policies and triggers) are not covered by `npm test`; check them
@@ -392,7 +390,8 @@ and [DEPLOY.md](DEPLOY.md), step 5).
 
 ## esb-sync edge function
 
-`supabase/functions/esb-sync/index.ts` (Deno, supabase-js v2) fetches finished
+The esb-sync function (Deno, supabase-js v2: the logic is in `sync.js`, the wiring in
+`index.ts`, both in `supabase/functions/esb-sync/`) fetches finished
 tournaments at Stamford Bridge (`ECF-location-1`) from
 `football.esportsbattle.com/api`, day by day, and inserts their matches into `matches`,
 skipping `external_id`s that are already there. **Nothing in the site reads the

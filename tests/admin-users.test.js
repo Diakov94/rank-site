@@ -581,7 +581,7 @@ test("delete validates user_id and answers 404 for an unknown user", async () =>
 test("delete answers 409 when the database refuses to remove the last super admin", async () => {
   const { backend, handle } = await setup();
   backend.override("removeRole", async () => {
-    throw upstreamError("Cannot remove the last super admin", { status: 400, code: "P0001" });
+    throw upstreamError("Cannot remove the last super admin", { status: 409, code: "PT409" });
   });
   const res = await send(handle, { as: "super1", body: { action: "delete", user_id: ID.super2 } });
   assert.equal(res.status, 409);

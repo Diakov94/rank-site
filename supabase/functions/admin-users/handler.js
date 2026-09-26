@@ -161,7 +161,7 @@ function parseUserId(value) {
 /* A failed user_roles write as the caller, as the error to return. `forbidden` is the 403
  * message for a write the policies refused. Anything unrecognised stays a 500. */
 function roleWriteError(e, forbidden) {
-  if (/last super admin/i.test(messageOf(e))) return new HttpError(409, LAST_SUPER);
+  if (e && e.code === "PT409") return new HttpError(409, LAST_SUPER); // the last-super-admin trigger
   const code = e && e.code;
   const status = e && e.status;
   if (status === 401) return new HttpError(401, INVALID_TOKEN);
@@ -302,7 +302,6 @@ export function createHandler(deps) {
       await deps.deleteUser(target.id);
     } catch (e) {
       if (e && (e.status === 404 || e.code === "user_not_found")) throw new HttpError(404, USER_NOT_FOUND);
-      if (/last super admin/i.test(messageOf(e))) throw new HttpError(409, LAST_SUPER);
       if (target.roleId === null) throw e;
       throw new Error(`The user's role was removed, but the user could not be deleted: ${messageOf(e)}`, { cause: e });
     }

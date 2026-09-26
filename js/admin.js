@@ -21,7 +21,8 @@ const st = {
   resetSaving: false,
   access: null,        // what the account may do, from fetchAccess(); null outside the panel
   users: [],           // Users tab: [{ id, email, created_at, last_sign_in_at, role_id }]
-  roleData: null,      // loadRoleData() result, loaded by the open tab (Users or Roles)
+  userRoleData: null,  // Users tab: loadRoleData() result, null while it loads
+  roleData: null,      // Roles tab: loadRoleData() result
   roleUserCounts: null, // Roles tab: Map role id -> number of users, null until the tab loads
   creatingUser: false,
 };
@@ -64,7 +65,7 @@ function sessionFromAuth(data, fallback) {
 function readStoredSession() {
   try {
     var s = JSON.parse(localStorage.getItem(ADMIN_SESSION_KEY) || "null");
-    return s && s.access_token && s.refresh_token ? s : null;
+    return s && s.access_token && s.refresh_token && s.user_id ? s : null;
   } catch (e) {
     return null;
   }
@@ -86,12 +87,9 @@ function adminEmail() {
   return (st.session && st.session.email) || null;
 }
 
-/* Whether `a` and `b` ({ user_id, email }, such as two sessions) belong to the same user: by user id when both have one (older
- * stored sessions lack it), else by email, ignoring case. */
+/* Whether `a` and `b` ({ user_id }, such as two sessions) belong to the same user. */
 function sameSessionUser(a, b) {
-  if (a.user_id && b.user_id) return a.user_id === b.user_id;
-  var email = String(a.email || "").toLowerCase();
-  return !!email && email === String(b.email || "").toLowerCase();
+  return !!a.user_id && a.user_id === b.user_id;
 }
 
 /* A valid access token, refreshed first when it expires within a minute. */
@@ -349,13 +347,6 @@ async function tryLogin() {
   }
 }
 
-/* The server's answer to "is this account an admin?" (public.is_admin(), created by the
- * first RLS migration). Only asked before the roles migration is applied (see fetchAccess).
- * Throws when the question cannot be asked. */
-async function checkIsAdmin() {
-  return (await adminRequest("/rest/v1/rpc/is_admin", { method: "POST", body: {} })) === true;
-}
-
 /* ===== Access: roles and permissions =====
  * After login the panel asks the database what the account may do (public.my_access()) and
  * shows only the tabs and controls its role allows. The database enforces every write on its
@@ -378,26 +369,12 @@ var TABS = {
 };
 var TAB_IDS = Object.keys(TABS);
 
-/* What the signed-in account may do: { role, permissions, legacy }. role is
- * { id, name, is_super } or null (no access); permissions is a Set of the keys my_access()
- * returned (can() does not read it for a super role, which holds every permission). legacy:
- * the roles migration is not applied yet (there is no my_access RPC), so public.is_admin()
- * decides and an admin is a super admin. Throws when access cannot be verified; callers sign
- * out. */
+/* What the signed-in account may do: { role, permissions }. role is { id, name, is_super }
+ * or null (no access); permissions is a Set of the keys my_access() returned (can() does not
+ * read it for a super role, which holds every permission). Throws when access cannot be
+ * verified, including before the roles migration is applied; callers sign out. */
 async function fetchAccess() {
-  var data;
-  try {
-    data = await adminRequest("/rest/v1/rpc/my_access", { method: "POST", body: {} });
-  } catch (e) {
-    if (!(e.status === 404 && e.code === "PGRST202")) throw e;
-    var legacyAdmin = await checkIsAdmin();
-    return {
-      role: legacyAdmin ? { id: null, name: "Admin", is_super: true } : null,
-      permissions: new Set(),
-      legacy: true,
-    };
-  }
-  return parseAccess(data);
+  return parseAccess(await adminRequest("/rest/v1/rpc/my_access", { method: "POST", body: {} }));
 }
 
 /* my_access() -> { role: { id, name, is_super } | null, permissions: [keys] }. Anything else
@@ -405,20 +382,17 @@ async function fetchAccess() {
 function parseAccess(data) {
   if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("Unexpected my_access response");
   var role = data.role;
-  if (role === null || role === undefined) return { role: null, permissions: new Set(), legacy: false };
+  if (role === null || role === undefined) return { role: null, permissions: new Set() };
   if (typeof role !== "object" || Array.isArray(role)) throw new Error("Unexpected my_access response");
   var keys = (Array.isArray(data.permissions) ? data.permissions : [])
     .filter(function(k) { return typeof k === "string"; });
   return {
     role: { id: toRoleId(role.id), name: String(role.name ?? "") || "Unnamed role", is_super: role.is_super === true },
     permissions: new Set(keys),
-    legacy: false,
   };
 }
 
-function noAccessMessage(access) {
-  return access && access.legacy ? "This account is not an admin." : "This account has no role in the admin panel.";
-}
+var NO_ROLE_MSG = "This account has no role in the admin panel.";
 
 /* Whether the signed-in account holds permission `key` (a super admin holds every one). */
 function can(key) {
@@ -561,7 +535,7 @@ async function verifyAccess(stale) {
   if (stale()) return null;
   if (!access.role) {
     await endSession();
-    showLoginError(noAccessMessage(access));
+    showLoginError(NO_ROLE_MSG);
     return null;
   }
   st.access = access;
@@ -1000,6 +974,17 @@ function fillAdjNickSelect() {
 
 var ADJ_LIST_LIMIT = 200;
 
+/* Default date = the current work day (07:30–07:30 Kyiv), so a new adjustment applies from now.
+ * A default the admin has not changed moves on with the work day, when the tab loads and when
+ * Add is clicked, so a page left open past 07:30 does not backdate the next adjustment to
+ * yesterday's start. A date the admin picked stays. */
+function refreshAdjDateDefault() {
+  var adjDate = document.getElementById("adjDate");
+  if (adjDate && (!adjDate.value || adjDate.value === adjDate.dataset.defaultDate)) {
+    adjDate.value = adjDate.dataset.defaultDate = workDayOf();
+  }
+}
+
 async function loadAdjustmentsTab() {
   var container = document.getElementById("adjList");
   if (!container) return;
@@ -1008,13 +993,7 @@ async function loadAdjustmentsTab() {
   // Populate player select
   fillAdjNickSelect();
 
-  // Default date = the current work day (07:30–07:30 Kyiv), so a new adjustment applies from now.
-  // A default the admin has not changed moves on with the work day each time the tab (re)loads,
-  // so a page left open past 07:30 does not backdate the next adjustment to yesterday's start.
-  var adjDate = document.getElementById("adjDate");
-  if (adjDate && (!adjDate.value || adjDate.value === adjDate.dataset.defaultDate)) {
-    adjDate.value = adjDate.dataset.defaultDate = workDayOf();
-  }
+  refreshAdjDateDefault();
 
   // Load existing manual adjustments (monthly resets live in the Monthly Reset tab)
   try {
@@ -1082,6 +1061,7 @@ document.addEventListener("DOMContentLoaded", function() {
   if (addBtn) addBtn.addEventListener("click", async function() {
     var nick   = (document.getElementById("adjNick") || {}).value;
     var rating = parseFloat((document.getElementById("adjRating") || {}).value);
+    refreshAdjDateDefault();
     var date   = (document.getElementById("adjDate") || {}).value;
     var reason = ((document.getElementById("adjReason") || {}).value || "").trim();
 
@@ -2002,9 +1982,6 @@ function monthGridHtml(players) {
 }
 
 /* ===== Roles data (Users and Roles tabs) ===== */
-/* Shown in both tabs while the database has no roles yet (legacy access, see fetchAccess). */
-var ROLES_MIGRATION_MSG = "User and role management needs the roles migration. Apply it (see DEPLOY.md), then log in again.";
-
 /* The permissions, the roles and what each role holds, read with the admin's token (staff may
  * read all three). Returns { permissions: [{ key, label, description }], roles: [{ id, name,
  * description, is_super, permissions: Set }], byId: Map }. The super role holds every
@@ -2047,7 +2024,7 @@ function compareRoles(a, b) {
 }
 
 function roleById(id) {
-  return (id !== null && st.roleData && st.roleData.byId.get(id)) || null;
+  return (id !== null && st.userRoleData && st.userRoleData.byId.get(id)) || null;
 }
 
 /* Whether the signed-in account may give `role` to someone (as private.can_grant_role
@@ -2061,7 +2038,7 @@ function canGrantRole(role) {
 }
 
 function grantableRoles() {
-  return st.roleData ? st.roleData.roles.filter(canGrantRole) : [];
+  return st.userRoleData ? st.userRoleData.roles.filter(canGrantRole) : [];
 }
 
 function isOwnRole(role) {
@@ -2141,7 +2118,7 @@ function clearTypedPasswords() {
 }
 
 function isSelf(user) {
-  return !!st.session && sameSessionUser({ user_id: user.id, email: user.email }, st.session);
+  return !!st.session && sameSessionUser({ user_id: user.id }, st.session);
 }
 
 function roleNameOf(roleId) {
@@ -2152,25 +2129,16 @@ function roleNameOf(roleId) {
 
 async function loadUsersTab() {
   var list = document.getElementById("userList");
-  /* Only for the open tab (createUser reloads it after a request the admin may have left):
-   * it clears st.roleData, which the Roles tab would otherwise be using. */
+  /* Only for the open tab: createUser reloads it after a request the admin may have left. */
   if (!list || st.currentTab !== "users") return;
   var seq = ++usersLoadSeq;
-  var legacy = !!(st.access && st.access.legacy);
-  setHidden("createUserForm", legacy);
-  if (legacy) {
-    list.innerHTML = '<p class="loading-msg">' + escapeHtml(ROLES_MIGRATION_MSG) + '</p>';
-    return;
-  }
   list.innerHTML = '<p class="loading-msg">Loading…</p>';
-  st.roleData = null;
+  st.userRoleData = null;
   fillNewUserRoleSelect();
   try {
     var results = await Promise.all([loadRoleData(), callAdminUsers({ action: "list" })]);
-    /* A newer load replaced this one, or the Roles tab now owns st.roleData (the Users tab
-     * loads again when it is opened). */
-    if (seq !== usersLoadSeq || st.currentTab !== "users") return;
-    st.roleData = results[0];
+    if (seq !== usersLoadSeq) return; // a newer load replaced this one
+    st.userRoleData = results[0];
     st.users = normalizeUsers(results[1] && results[1].users);
     fillNewUserRoleSelect();
     renderUsers();
@@ -2189,7 +2157,7 @@ function fillNewUserRoleSelect(unavailable) {
   var select = document.getElementById("newUserRole");
   if (!select) return;
   var roles = grantableRoles();
-  select.replaceChildren(makeOption("", st.roleData ? (roles.length ? "Choose a role…" : "No role you can assign") : unavailable || "Loading…", true));
+  select.replaceChildren(makeOption("", st.userRoleData ? (roles.length ? "Choose a role…" : "No role you can assign") : unavailable || "Loading…", true));
   roles.forEach(function(role) { select.appendChild(makeOption(String(role.id), role.name, false)); });
   select.disabled = !roles.length;
   updateCreateUserBtn();
@@ -2411,21 +2379,13 @@ async function loadRolesTab() {
   var list = document.getElementById("roleList");
   if (!list) return;
   var seq = ++rolesLoadSeq;
-  var legacy = !!(st.access && st.access.legacy);
-  setHidden("createRoleForm", legacy);
-  if (legacy) {
-    list.innerHTML = '<p class="loading-msg">' + escapeHtml(ROLES_MIGRATION_MSG) + '</p>';
-    return;
-  }
   list.innerHTML = '<p class="loading-msg">Loading…</p>';
   try {
     var results = await Promise.all([
       loadRoleData(),
       adminRows("user_roles", "user_id,role_id", "user_id.asc"),
     ]);
-    /* A newer load replaced this one, or the Users tab now owns st.roleData (the Roles tab
-     * loads again when it is opened). */
-    if (seq !== rolesLoadSeq || st.currentTab !== "roles") return;
+    if (seq !== rolesLoadSeq) return; // a newer load replaced this one
     st.roleData = results[0];
     st.roleUserCounts = new Map();
     results[1].forEach(function(r) {
@@ -2579,7 +2539,6 @@ async function saveRole(role, card) {
     if (role.name !== oldName) changes.push('renamed from "' + oldName + '"');
     if (role.description !== oldDescription) changes.push("description changed");
     writeLog("Role updated", role.name + ": " + (changes.join(", ") || "saved"));
-    if (!st.roleData) return; // being loaded again (see loadUsersTab); opening the tab redraws it
     st.roleData.roles.sort(compareRoles);
     renderRoles();
   } catch (e) {
@@ -2595,7 +2554,6 @@ async function deleteRole(role, card) {
   try {
     await adminRequest("/rest/v1/roles?id=eq." + encodeURIComponent(role.id), { method: "DELETE", mustMatch: true });
     writeLog("Role deleted", role.name);
-    if (!st.roleData) return; // being loaded again (see loadUsersTab); opening the tab redraws it
     /* By id: st.roleData may have been loaded again since this card was drawn. */
     st.roleData.roles = st.roleData.roles.filter(function(r) { return r.id !== role.id; });
     st.roleData.byId.delete(role.id);
@@ -2752,7 +2710,6 @@ async function addNewPlayer() {
     await adminRequest("/rest/v1/player_config", {
       method: "POST",
       body: { nickname: nick, initial_rating: rating, active: true },
-      prefer: "return=representation",
     });
 
     writeLog("Player added", nick + " (rating: " + rating + ")");

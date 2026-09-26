@@ -4,7 +4,7 @@
  * ============================================================ */
 "use strict";
 
-/* Uses SUPABASE, ADMIN_SESSION_KEY and the helpers from common.js, MONTH_ABBR from sheets.js,
+/* Uses ADMIN_SESSION_KEY and the helpers from common.js, MONTH_ABBR from sheets.js,
  * and buildRatings / sbFetchAll from engine.js. */
 
 /* ================== CONFIG ================== */
@@ -585,7 +585,7 @@ function hideMiniCard() {
  * another opens the comparison. */
 function onCompareClick(nick) {
   const first = state.compareNick;
-  state.compareNick = first || first === nick ? null : nick;
+  state.compareNick = first ? null : nick;
   markCompareButtons();
   if (first && first !== nick) openCompareModal(first, nick);
 }
@@ -660,13 +660,20 @@ function openCompareModal(nick1, nick2) {
   els.compareGrid.querySelectorAll(".compare-col-avatar").forEach((img, i) => setAvatar(img, pair[i].nick));
 
   state.compareReturnNick = nick2;
+  setPageInert(true);
   els.compareModal.style.display = "flex";
   els.compareClose?.focus();
+}
+
+/* aria-modal: while the comparison is open the rest of the page takes no focus or clicks. */
+function setPageInert(on) {
+  for (const el of document.body.children) if (el !== els.compareModal) el.inert = on;
 }
 
 function closeCompareModal() {
   if (!els.compareModal || els.compareModal.style.display === "none") return;
   els.compareModal.style.display = "none";
+  setPageInert(false); // before focusing: an inert element takes no focus
 
   // Looked up by nick, so it also works after a refresh re-rendered the table.
   rowFor(state.compareReturnNick)?.querySelector(".cmp-btn")?.focus();

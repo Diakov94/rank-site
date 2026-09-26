@@ -429,7 +429,7 @@ test("normalizeGroups validates, normalizes and sorts groups", () => {
   const rows = [
     { id: 3, name: "Low", min_rating: 0, color: "red", coef: 2.5 },
     { id: 1, name: "Top", min_rating: "1100", color: "#ABCDEF", coef: "1" },
-    { id: 2, name: "Mid", min: 1000, color: "#123", coef: 0 },
+    { id: 2, name: "Mid", min_rating: 1000, color: "#123", coef: 0 },
     { id: 7, name: "Neg", min_rating: 500, color: " #abcd ", coef: -1 },
     { id: 8, name: "NoCoef", min_rating: 250, coef: null },
     { id: 4, name: "Null", min_rating: null, coef: 2 },
@@ -447,13 +447,12 @@ test("normalizeGroups validates, normalizes and sorts groups", () => {
   ];
   const groups = normalizeGroups(rows);
   assert.deepEqual(plain(groups), expected);
-  assert.deepEqual(plain(normalizeGroups(groups)), expected, "idempotent");
   assert.deepEqual(plain(normalizeGroups(undefined)), []);
-  assert.deepEqual(plain(normalizeGroups([{ name: "x", min: 5 }])), [{ id: null, name: "x", min: 5, color: "#8a94a6", coef: 1 }]);
+  assert.deepEqual(plain(normalizeGroups([{ name: "x", min_rating: 5 }])), [{ id: null, name: "x", min: 5, color: "#8a94a6", coef: 1 }]);
 });
 
 test("normalizeGroups keeps the input order for equal minimums", () => {
-  const groups = normalizeGroups([{ id: 1, name: "a", min: 0 }, { id: 2, name: "b", min: 10 }, { id: 3, name: "c", min: 0 }]);
+  const groups = normalizeGroups([{ id: 1, name: "a", min_rating: 0 }, { id: 2, name: "b", min_rating: 10 }, { id: 3, name: "c", min_rating: 0 }]);
   assert.deepEqual(plain(groups).map((g) => g.id), [2, 1, 3]);
 });
 

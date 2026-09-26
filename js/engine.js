@@ -49,9 +49,8 @@ async function loadEngineData() {
 }
 
 /* ================== RATING GROUPS ==================
- * rating_groups rows (min_rating) or already normalized groups (min) ->
- * [{ id, name, min, color, coef }] sorted by min descending. Rows without a finite
- * minimum are dropped; a missing or non-positive coef counts as 1. Idempotent. */
+ * rating_groups rows -> [{ id, name, min, color, coef }] sorted by min descending. Rows
+ * without a finite min_rating are dropped; a missing or non-positive coef counts as 1. */
 function normalizeGroups(rows) {
   return (Array.isArray(rows) ? rows : [])
     .filter((g) => g && typeof g === "object")
@@ -60,7 +59,7 @@ function normalizeGroups(rows) {
       return {
         id: g.id ?? null,
         name: String(g.name ?? ""),
-        min: numberOrNaN(g.min_rating ?? g.min),
+        min: numberOrNaN(g.min_rating),
         color: safeColor(g.color),
         coef: Number.isFinite(coef) && coef > 0 ? coef : 1,
       };
