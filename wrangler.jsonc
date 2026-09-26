@@ -1,0 +1,9 @@
+// Cloudflare Workers Builds: this site is static files only, served from the repository
+// root (.assetsignore keeps everything else out). Without this file wrangler guesses the
+// project type and, once package.json exists, installs itself into node_modules and tries
+// to upload that too (one binary is over the 25 MiB per-file limit).
+{
+  "name": "rank-site",
+  "compatibility_date": "2026-09-25",
+  "assets": { "directory": "." }
+}

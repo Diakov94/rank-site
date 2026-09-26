@@ -1,0 +1,11 @@
+# Not part of the website (see wrangler.jsonc)
+.git
+.github
+node_modules
+.wrangler
+supabase
+tests
+*.md
+package.json
+package-lock.json
+wrangler.jsonc

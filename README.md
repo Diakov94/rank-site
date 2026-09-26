@@ -163,6 +163,7 @@ A player's profile shows two ratings:
 | `supabase/migrations/` | SQL for Row Level Security, roles and permissions. |
 | `supabase/tests/roles_test.sql` | SQL self-test of the roles rules; it rolls itself back. |
 | `tests/` | Unit tests (Node's built-in test runner). |
+| `wrangler.jsonc`, `.assetsignore` | Cloudflare Workers build: serve the site's static files from the repository root and nothing else (no build step). |
 | `DEPLOY.md` | The deployment runbook, in English and Ukrainian: the manual Supabase steps (migrations, the first super admin, the admin-users function, redeploying esb-sync) and the checks after them. |
 
 The pages load their scripts as classic `defer` scripts, in this order:
