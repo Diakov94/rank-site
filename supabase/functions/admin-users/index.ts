@@ -8,18 +8,34 @@
  *   - a caller client per request (anon key plus the caller's Authorization header) for
  *     my_access() and for the user_roles writes, so RLS and the last-super-admin trigger
  *     check those as the caller.
- * Env (set by Supabase): SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_ANON_KEY.
- * Deploy: supabase functions deploy admin-users --no-verify-jwt (see DEPLOY.md, step 3).
- * The flag turns off only the gateway's own JWT check, which rejects valid sign-ins on
- * projects with Supabase's new API keys, as this one has. The function still checks every
- * caller's token itself: verifyToken below (auth.getUser), then my_access() as the caller.
+ * Env (set by Supabase): SUPABASE_URL, and the project keys (see projectKey below).
+ * Deploy (DEPLOY.md, step 3): in the Supabase dashboard with this file and handler.js, then
+ * turn off "Verify JWT with legacy secret"; or supabase functions deploy admin-users
+ * --no-verify-jwt. That switch is only the gateway's own JWT check, which rejects valid
+ * sign-ins on projects with Supabase's new API keys, as this one has. The function still
+ * checks every caller's token itself: verifyToken below (auth.getUser), then my_access() as
+ * the caller.
  */
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { createHandler } from "./handler.js";
 
+/* A project key. Supabase gives functions the new keys as JSON (key name -> key, "default"
+ * first) in SUPABASE_SECRET_KEYS and SUPABASE_PUBLISHABLE_KEYS, and the legacy JWT keys, which
+ * stop working once they are disabled, in SUPABASE_SERVICE_ROLE_KEY and SUPABASE_ANON_KEY. */
+function projectKey(newKeys: string, legacyKey: string): string {
+  try {
+    const keys = JSON.parse(Deno.env.get(newKeys) ?? "{}");
+    const key = keys.default ?? Object.values(keys)[0];
+    if (typeof key === "string" && key) return key;
+  } catch {
+    // not JSON: use the legacy key
+  }
+  return Deno.env.get(legacyKey)!;
+}
+
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL")!;
-const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-const ANON_KEY = Deno.env.get("SUPABASE_ANON_KEY")!;
+const SERVICE_ROLE_KEY = projectKey("SUPABASE_SECRET_KEYS", "SUPABASE_SERVICE_ROLE_KEY");
+const ANON_KEY = projectKey("SUPABASE_PUBLISHABLE_KEYS", "SUPABASE_ANON_KEY");
 const USERS_PER_PAGE = 1000; // Auth admin listUsers page size
 const MAX_USER_PAGES = 50; // list at most 50 000 users
 const ROWS_PER_PAGE = 1000; // user_roles rows per request (Supabase's default PostgREST max-rows)

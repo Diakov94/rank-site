@@ -32,10 +32,21 @@ const CORS_HEADERS = {
   "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
 };
 
-const supabase = createClient(
-  Deno.env.get("SUPABASE_URL")!,
-  Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!
-);
+/* The service key: the new secret key when Supabase provides it (JSON, key name -> key,
+ * "default" first, in SUPABASE_SECRET_KEYS), else the legacy SUPABASE_SERVICE_ROLE_KEY, which
+ * stops working once the legacy keys are disabled. */
+function serviceKey(): string {
+  try {
+    const keys = JSON.parse(Deno.env.get("SUPABASE_SECRET_KEYS") ?? "{}");
+    const key = keys.default ?? Object.values(keys)[0];
+    if (typeof key === "string" && key) return key;
+  } catch {
+    // not JSON: use the legacy key
+  }
+  return Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
+}
+
+const supabase = createClient(Deno.env.get("SUPABASE_URL")!, serviceKey());
 
 function jsonResponse(body: unknown, status = 200, extraHeaders: Record<string, string> = {}): Response {
   const text = JSON.stringify(body);

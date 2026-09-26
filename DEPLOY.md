@@ -27,7 +27,7 @@ file, because that brings back its old admin checks; if it happens, run the role
 again.
 
 With the [Supabase CLI](https://supabase.com/docs/guides/cli) you can run
-`supabase db push` instead, after linking the project in step 3. It asks for the
+`supabase db push` instead, after linking the project (step 3). It asks for the
 database password and applies the migrations that have not run yet.
 
 Either way, then check that every table got its protection. Run this in the SQL Editor;
@@ -63,33 +63,52 @@ on conflict (user_id) do update set role_id = excluded.role_id;
 
 Once steps 3 and 4 are done, you can create every other user and role from the admin panel.
 
-### 3. Deploy the server functions
+### 3. Deploy the `admin-users` function (only for the Users tab)
 
-The admin panel's **Users** tab creates and deletes accounts through the `admin-users`
-function. From the repository folder:
+The admin panel's **Users** tab lists, creates and deletes accounts and sets passwords
+through the `admin-users` server function. Everything else in the admin panel, the Roles
+tab included, works without it, so you can do this step after step 4. Until you do, the
+Users tab says "The admin-users server function did not answer", and you can add and
+delete accounts under **Authentication → Users** in the Supabase dashboard (give them a
+role with the query in step 2, or later in the Users tab).
+
+No tools to install. In the Supabase dashboard:
+
+1. Open **Edge Functions**, click **Deploy a new function** and choose **Via Editor**.
+2. Name it `admin-users`.
+3. Replace the contents of the starter file `index.ts` with
+   `supabase/functions/admin-users/index.ts`. Add a file named `handler.js` with the
+   contents of `supabase/functions/admin-users/handler.js`.
+4. Click **Deploy function**.
+5. Open the function's **Details** tab, switch off **Verify JWT with legacy secret** and
+   click **Save changes**. A function made in the editor starts with it on. Check it again
+   after every later update.
+
+That switch is the gateway's own token check, which rejects valid sign-ins on projects
+that use Supabase's new API keys, as this one does. The function checks every caller's
+token itself. Supabase provides the project URL and keys to the function automatically,
+so there are no secrets to set, and the master key never reaches the browser.
+
+With the [Supabase CLI](https://supabase.com/docs/guides/cli) instead, from the
+repository folder:
 
 ```sh
-brew install supabase/tap/supabase                # once; other systems: see the CLI docs
 supabase login
 supabase link --project-ref vgmwxtpsbwzeqwtpxamo
 supabase functions deploy admin-users --no-verify-jwt
 ```
 
-`--no-verify-jwt` turns off the gateway's own token check, which rejects valid sign-ins
-on projects that use Supabase's new API keys, as this one does. The function checks
-every caller's token itself. Supabase provides the project URL and keys to the function
-automatically, so there are no secrets to set, and the master key never reaches the
-browser.
+`--no-verify-jwt` switches off the same check as item 5 above.
 
-If you use the `esb-sync` function, redeploy it too, so the fixes in this version take
-effect:
-
-```sh
-supabase functions deploy esb-sync --no-verify-jwt
-```
-
-Until you do, the old version keeps running as before. The flag keeps the function
-callable whatever key its caller sends. Unless you set `SYNC_SECRET` (see "Optional
+**`esb-sync` (optional).** The version that is live now keeps syncing matches as before,
+and the website does not read the `matches` table, so you can leave it. To get the fixes
+in this version, open `esb-sync` under **Edge Functions**, replace its code with
+`supabase/functions/esb-sync/index.ts`, add a file `sync.js` with the contents of
+`supabase/functions/esb-sync/sync.js`, and deploy the update. Leave its **Verify JWT with
+legacy secret** switch as it is: an update from the dashboard keeps it, so whatever calls
+the function today keeps working. With the CLI, run
+`supabase functions deploy esb-sync --no-verify-jwt` instead, which keeps it callable
+whatever key its caller sends; then, unless you set `SYNC_SECRET` (see "Optional
 hardening" below), anyone who knows its URL can start a sync, which only copies finished
 matches from ESportsBattle.
 
@@ -111,11 +130,11 @@ Merge the pull request so that your hosting publishes the new version.
 - **Sign-ups:** under **Authentication → Sign In / Providers**, switch off **Allow new
   users to sign up**. This is not required, because a new account has no role and cannot
   change anything.
-- **Match sync:** if you use the `esb-sync` function, you can protect it by running
-  `supabase secrets set SYNC_SECRET=<random value>` and redeploying it with
-  `supabase functions deploy esb-sync --no-verify-jwt` (the flag is needed for the same
-  reason as in step 3; the function checks the secret itself). Anything that calls it must
-  then send the header `x-sync-secret`.
+- **Match sync:** if you use the `esb-sync` function, you can protect it with a secret:
+  add `SYNC_SECRET=<random value>` under **Edge Functions → Secrets** (or run
+  `supabase secrets set SYNC_SECRET=<random value>`), and deploy this version of
+  `esb-sync` as in step 3. The function checks the secret itself. Anything that calls it
+  must then send the header `x-sync-secret`.
 
 ### If something goes wrong
 
@@ -124,8 +143,8 @@ Merge the pull request so that your hosting publishes the new version.
 | "This account has no role in the admin panel." | Do step 2 for that account, or give it a role in the Users tab. |
 | "Could not verify admin access. Try again." | Check that both migrations ran (step 1). |
 | "Connection error. Try again." when logging in or opening the admin panel | The network failed, or Supabase answered with a server error (5xx). If your password was already accepted, you stay signed in; try again in a moment. |
-| The Users tab shows an error | The `admin-users` function is not deployed yet (step 3). |
-| The Users tab says "The server function rejected your sign-in (… Invalid JWT …)" | Deploy `admin-users` again with `--no-verify-jwt` (step 3). |
+| The Users tab says "The admin-users server function did not answer." (an older build: "Failed to fetch" or "Load failed") | The `admin-users` function is not deployed yet (step 3). |
+| The Users tab says "The server function rejected your sign-in (… Invalid JWT …)" | Switch off **Verify JWT with legacy secret** for `admin-users` (step 3, item 5). |
 | Locked out of the admin panel | The SQL Editor always works, whatever the roles are. Run step 2 again for your account. |
 | `esb-sync` answers 400 | The request has a date that is not a real `YYYY-MM-DD` date, `dateFrom` after `dateTo` (after today when `dateTo` is left out), or `dateTo` without `dateFrom`. |
 | `esb-sync` answers 500 with "settings.esb_sync_cursor is …" | The `esb_sync_cursor` row in the `settings` table is not a date on or before today. Fix it, or delete it to start again from 2026-01-01. |
@@ -157,7 +176,7 @@ Merge the pull request so that your hosting publishes the new version.
 запустіть файл ролей ще раз.
 
 Замість цього можна скористатися [Supabase CLI](https://supabase.com/docs/guides/cli) і
-виконати `supabase db push` після того, як під'єднаєте проєкт на кроці 3. Команда
+виконати `supabase db push` після того, як під'єднаєте проєкт (крок 3). Команда
 запитає пароль бази даних і застосує міграції, які ще не виконувалися.
 
 У будь-якому разі потім перевірте, що кожна таблиця отримала захист. Виконайте цей запит
@@ -194,35 +213,56 @@ on conflict (user_id) do update set role_id = excluded.role_id;
 
 Коли виконаєте кроки 3 і 4, усіх інших користувачів і ролі можна буде створювати в адмін-панелі.
 
-### 3. Розгорніть серверні функції
+### 3. Розгорніть функцію `admin-users` (лише для вкладки Users)
 
-Вкладка **Users** в адмін-панелі створює та видаляє облікові записи через функцію
-`admin-users`. У папці репозиторію виконайте:
+Вкладка **Users** в адмін-панелі показує, створює та видаляє облікові записи й задає
+паролі через серверну функцію `admin-users`. Усе інше в адмін-панелі, зокрема вкладка
+Roles, працює без неї, тож цей крок можна виконати й після кроку 4. Доки ви цього не
+зробите, на вкладці Users написано "The admin-users server function did not answer", а
+облікові записи можна додавати й видаляти в **Authentication → Users** у дашборді
+Supabase (роль їм можна дати запитом із кроку 2 або пізніше на вкладці Users).
+
+Нічого встановлювати не потрібно. У дашборді Supabase:
+
+1. Відкрийте **Edge Functions**, натисніть **Deploy a new function** і виберіть
+   **Via Editor**.
+2. Назвіть функцію `admin-users`.
+3. Замініть вміст початкового файлу `index.ts` на вміст
+   `supabase/functions/admin-users/index.ts`. Додайте файл `handler.js` із вмістом
+   `supabase/functions/admin-users/handler.js`.
+4. Натисніть **Deploy function**.
+5. Відкрийте вкладку **Details** цієї функції, вимкніть **Verify JWT with legacy secret**
+   і натисніть **Save changes**. У функції, створеної в редакторі, цей перемикач спочатку
+   ввімкнений. Перевіряйте його після кожного наступного оновлення.
+
+Цей перемикач вмикає власну перевірку токенів у шлюзі, яка відхиляє коректні входи в
+проєктах із новими API-ключами Supabase, як у цьому проєкті. Функція сама перевіряє
+токен кожного, хто її викликає. Supabase автоматично передає функції URL проєкту та
+ключі, тож жодних секретів налаштовувати не потрібно, а головний ключ ніколи не потрапляє
+в браузер.
+
+Натомість можна скористатися [Supabase CLI](https://supabase.com/docs/guides/cli) у
+папці репозиторію:
 
 ```sh
-brew install supabase/tap/supabase                # один раз; для інших систем див. документацію CLI
 supabase login
 supabase link --project-ref vgmwxtpsbwzeqwtpxamo
 supabase functions deploy admin-users --no-verify-jwt
 ```
 
-`--no-verify-jwt` вимикає власну перевірку токенів у шлюзі, яка відхиляє коректні входи
-в проєктах із новими API-ключами Supabase, як у цьому проєкті. Функція сама перевіряє
-токен кожного, хто її викликає. Supabase автоматично передає функції URL проєкту та
-ключі, тож жодних секретів налаштовувати не потрібно, а головний ключ ніколи не потрапляє
-в браузер.
+`--no-verify-jwt` вимикає ту саму перевірку, що й пункт 5 вище.
 
-Якщо ви використовуєте функцію `esb-sync`, розгорніть і її повторно, щоб запрацювали
-виправлення з цієї версії:
-
-```sh
-supabase functions deploy esb-sync --no-verify-jwt
-```
-
-Доки ви цього не зробите, працює стара версія, як і раніше. Прапорець залишає функцію
-доступною, хоч би який ключ надсилав той, хто її викликає. Якщо не налаштувати
-`SYNC_SECRET` (див. розділ "Додатковий захист" нижче), синхронізацію може запустити кожен, хто знає
-URL функції; вона лише копіює завершені матчі з ESportsBattle.
+**`esb-sync` (необов'язково).** Версія, яка працює зараз, і далі синхронізує матчі, як
+раніше, а сайт не читає таблицю `matches`, тож її можна не чіпати. Щоб отримати
+виправлення з цієї версії, відкрийте `esb-sync` в **Edge Functions**, замініть її код на
+`supabase/functions/esb-sync/index.ts`, додайте файл `sync.js` із вмістом
+`supabase/functions/esb-sync/sync.js` і розгорніть оновлення. Перемикач **Verify JWT with
+legacy secret** залиште як є: оновлення з дашборду його зберігає, тож усе, що викликає
+функцію зараз, і далі працюватиме. Через CLI натомість виконайте
+`supabase functions deploy esb-sync --no-verify-jwt`: так функцію можна викликати з
+будь-яким ключем, і, якщо не налаштувати `SYNC_SECRET` (див. розділ "Додатковий захист"
+нижче), синхронізацію може запустити кожен, хто знає URL функції; вона лише копіює
+завершені матчі з ESportsBattle.
 
 ### 4. Розгорніть сайт
 
@@ -243,10 +283,10 @@ URL функції; вона лише копіює завершені матчі
   to sign up**. Це не обов'язково, адже новий обліковий запис не має ролі й нічого не
   може змінити.
 - **Синхронізація матчів:** якщо ви використовуєте функцію `esb-sync`, її можна
-  захистити: виконайте `supabase secrets set SYNC_SECRET=<випадкове значення>` і повторно
-  розгорніть її командою `supabase functions deploy esb-sync --no-verify-jwt` (прапорець
-  потрібен із тієї самої причини, що й на кроці 3; секрет функція перевіряє сама). Після
-  цього все, що її викликає, має надсилати заголовок `x-sync-secret`.
+  захистити секретом: додайте `SYNC_SECRET=<випадкове значення>` в **Edge Functions →
+  Secrets** (або виконайте `supabase secrets set SYNC_SECRET=<випадкове значення>`) і
+  розгорніть цю версію `esb-sync`, як описано на кроці 3. Секрет функція перевіряє сама.
+  Після цього все, що її викликає, має надсилати заголовок `x-sync-secret`.
 
 ### Якщо щось пішло не так
 
@@ -255,8 +295,8 @@ URL функції; вона лише копіює завершені матчі
 | "This account has no role in the admin panel." | Виконайте крок 2 для цього облікового запису або призначте йому роль на вкладці Users. |
 | "Could not verify admin access. Try again." | Перевірте, що обидві міграції виконано (крок 1). |
 | "Connection error. Try again." під час входу або відкриття адмін-панелі | Стався збій мережі, або Supabase відповів помилкою сервера (5xx). Якщо пароль уже було прийнято, ви залишаєтеся в системі; спробуйте ще раз трохи пізніше. |
-| На вкладці Users показується помилка | Функцію `admin-users` ще не розгорнуто (крок 3). |
-| На вкладці Users написано "The server function rejected your sign-in (… Invalid JWT …)" | Розгорніть `admin-users` ще раз із `--no-verify-jwt` (крок 3). |
+| На вкладці Users написано "The admin-users server function did not answer." (у старішій збірці: "Failed to fetch" або "Load failed") | Функцію `admin-users` ще не розгорнуто (крок 3). |
+| На вкладці Users написано "The server function rejected your sign-in (… Invalid JWT …)" | Вимкніть **Verify JWT with legacy secret** для `admin-users` (крок 3, пункт 5). |
 | Немає доступу до адмін-панелі | SQL Editor працює завжди, незалежно від ролей. Виконайте крок 2 ще раз для свого облікового запису. |
 | `esb-sync` повертає код 400 | У запиті є дата, що не є справжньою датою у форматі `YYYY-MM-DD`, `dateFrom` пізніша за `dateTo` (або за сьогоднішню дату, якщо `dateTo` не передано), або `dateTo` передано без `dateFrom`. |
 | `esb-sync` повертає код 500 з повідомленням "settings.esb_sync_cursor is …" | У рядку `esb_sync_cursor` таблиці `settings` записано не дату або дату, пізнішу за сьогоднішню. Виправте його або видаліть, щоб почати знову з 2026-01-01. |

@@ -347,7 +347,9 @@ then check it (the SQL self-test is optional). The notes below explain how the p
 - **The first super admin** is added with SQL (DEPLOY.md step 2). The SQL editor bypasses
   RLS, so this also works when you are locked out of the admin panel. Everyone else can
   then be created and given roles in the Users tab.
-- **admin-users** is deployed with `supabase functions deploy admin-users --no-verify-jwt`.
+- **admin-users** is deployed with its JWT check off: from the dashboard editor with
+  "Verify JWT with legacy secret" switched off, or with
+  `supabase functions deploy admin-users --no-verify-jwt` (DEPLOY.md step 3).
   The gateway's own JWT check rejects valid sign-ins on projects with Supabase's new API
   keys, as this one has, and the function verifies every caller's token itself with
   `auth.getUser` (see [admin-users edge function](#admin-users-edge-function)).
@@ -510,10 +512,12 @@ could not grant gets 403. Passwords need at least 8 characters. Errors are
 missing permission, 404 for an unknown user, 405 for other methods, 409 when the email is
 taken or for the last super admin, and 500 otherwise.
 
-Deploy it with `supabase functions deploy admin-users --no-verify-jwt` (DEPLOY.md,
-step 3). The flag turns off only the gateway's own JWT check, which rejects valid sign-ins
+Deploy it from the Supabase dashboard editor and switch off "Verify JWT with legacy
+secret", or with `supabase functions deploy admin-users --no-verify-jwt` (DEPLOY.md,
+step 3). Either turns off only the gateway's own JWT check, which rejects valid sign-ins
 on projects with Supabase's new API keys, as this one has. The function still verifies
 every call itself: `verifyToken` checks the bearer token with `auth.getUser` (401 when it
 is missing or invalid), and the permissions come from `my_access()` called as the caller.
-It uses the project URL and keys that Supabase gives every function, so there are no
-secrets to set.
+It uses the project URL and keys that Supabase gives every function (the new keys in
+`SUPABASE_SECRET_KEYS` and `SUPABASE_PUBLISHABLE_KEYS` when present, else the legacy
+`SUPABASE_SERVICE_ROLE_KEY` and `SUPABASE_ANON_KEY`), so there are no secrets to set.

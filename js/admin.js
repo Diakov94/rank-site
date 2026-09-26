@@ -203,7 +203,7 @@ async function adminRequest(path, opts) {
       var gatewayText = await res.text();
       throw Object.assign(new Error(
         "The server function rejected your sign-in (" + (gatewayText || "HTTP 401") + "). " +
-        "Deploy it with --no-verify-jwt, see DEPLOY.md."
+        "Turn off \"Verify JWT with legacy secret\" for it in the Supabase dashboard, see DEPLOY.md, step 3."
       ), { status: 401 });
     }
     if (res.status === 401) {
@@ -2190,14 +2190,20 @@ var MIN_PASSWORD_LENGTH = 8;
 var EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 var usersLoadSeq = 0;
 
-/* POST to the admin-users function. A 404 without the function's own { error } means the
- * function itself is missing. */
+/* POST to the admin-users function. In a browser, a function that is not deployed fails the
+ * CORS preflight (the gateway answers it with 404), so fetch throws a TypeError before any
+ * status is seen; without a preflight it is a 404 without the function's own { error }. */
+var ADMIN_USERS_UNAVAILABLE_MSG =
+  "The admin-users server function did not answer. If it is not deployed yet, see DEPLOY.md, step 3; " +
+  "until then, add and delete accounts under Authentication → Users in the Supabase dashboard. " +
+  "If it is deployed, check your connection and try again.";
+
 async function callAdminUsers(payload) {
   try {
     return await adminRequest(ADMIN_USERS_PATH, { method: "POST", body: payload });
   } catch (e) {
-    if (e.status === 404 && typeof errorBody(e).error !== "string") {
-      throw Object.assign(new Error("The admin-users Edge Function is not deployed (HTTP 404)."), { status: 404 });
+    if (e instanceof TypeError || (e.status === 404 && typeof errorBody(e).error !== "string")) {
+      throw Object.assign(new Error(ADMIN_USERS_UNAVAILABLE_MSG, { cause: e }), { status: e.status });
     }
     throw e;
   }
