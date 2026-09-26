@@ -173,7 +173,8 @@ npm test
 
 Requires Node.js 20 or newer and has no dependencies to install. The tests load the
 site's scripts into one `vm` context the way the pages do (`tests/helpers/load.js`) and
-stub `fetch`.
+stub `fetch`. The CI workflow `.github/workflows/test.yml` runs `npm test` on every push
+and pull request.
 
 ## esb-sync edge function
 
