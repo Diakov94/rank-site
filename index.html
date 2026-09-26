@@ -7,7 +7,8 @@
   <meta name="theme-color" content="#0b0f14" />
   <title>ESportsBattle Rank</title>
   <link rel="icon" href="./icons/favicon.svg" type="image/svg+xml" />
-  <link rel="preconnect" href="https://script.google.com" crossorigin />
+  <link rel="preconnect" href="https://vgmwxtpsbwzeqwtpxamo.supabase.co" crossorigin />
+  <link rel="preconnect" href="https://docs.google.com" crossorigin />
   <link rel="stylesheet" href="./css/styles.css" />
 </head>
 <body>
@@ -35,7 +36,7 @@
 </header>
 
 <!-- Player of the Week banner -->
-<div id="weekBanner" class="week-banner" style="display:none;">
+<div id="weekBanner" class="week-banner" style="display:none;" role="button" tabindex="0">
   <div class="container week-inner">
     <div class="week-label">Player of the Week</div>
     <div class="week-player">
@@ -63,11 +64,11 @@
 </div>
 
 <!-- Comparison modal -->
-<div id="compareModal" class="compare-modal" style="display:none;">
+<div id="compareModal" class="compare-modal" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="compareTitle">
   <div class="compare-backdrop"></div>
   <div class="compare-box">
-    <button id="compareClose" class="compare-close" type="button">✕</button>
-    <h2 class="compare-title">Player Comparison</h2>
+    <button id="compareClose" class="compare-close" type="button" aria-label="Close">✕</button>
+    <h2 id="compareTitle" class="compare-title">Player Comparison</h2>
     <div class="compare-grid" id="compareGrid"></div>
   </div>
 </div>
@@ -136,21 +137,16 @@
 
 <button id="backToTop" class="back-to-top" type="button" aria-label="Back to top">↑</button>
 
+<!-- Non-blocking notice when a refresh fails -->
+<div id="loadNotice" class="load-notice" role="status" hidden></div>
+
 <footer>
   <span>Created by @Sfg_m</span>
 </footer>
 
+<script src="./js/common.js" defer></script>
 <script src="./js/sheets.js" defer></script>
 <script src="./js/engine.js" defer></script>
 <script src="./js/app.js" defer></script>
-<script>
-  (function() {
-    var m = document.cookie.match("(?:^|; )esb_admin=([^;]*)");
-    if (m && m[1]) {
-      var el = document.getElementById("adminLink");
-      if (el) el.style.display = "";
-    }
-  })();
-</script>
 </body>
 </html>

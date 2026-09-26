@@ -1,63 +1,9 @@
 /* ============================================================
  * ESportsBattle Admin Panel — Supabase edition
+ * Uses SUPABASE, ADMIN_SESSION_KEY, sbHeaders and the helpers in common.js,
+ * and buildRatings / normalizeGroups from engine.js.
  * ============================================================ */
 "use strict";
-
-const SUPABASE = Object.freeze({
-  URL: "https://vgmwxtpsbwzeqwtpxamo.supabase.co",
-  KEY: "sb_publishable_RjvZCtsriMO6nGDASJkcbg_estuVZyq",
-  BUCKET: "player-avatars",
-  ACH_BUCKET: "achievements",
-});
-
-const ADMIN_CFG = Object.freeze({
-  PASS_B64: "RVNCQWRtaW4xMjM=",
-  DATA_URL: "https://script.google.com/macros/s/AKfycbxkLrAorAf8PMAB3Wu9vBv7DIcjj9tj6W4KrnuEVYMvrV563bWQ0clgsultApJnEOy0/exec",
-  COOKIE: "esb_admin",
-});
-
-/* ===== Rating groups ===== */
-var GROUPS = [
-  { name: "Legend",       min: 1250, color: "#e53a2e" },
-  { name: "Icon",         min: 1125, color: "#dab823" },
-  { name: "Elite",        min: 1000, color: "#f0ff25" },
-  { name: "Champion",     min:  875, color: "#20b839" },
-  { name: "World Class",  min:  750, color: "#b8b8b8" },
-  { name: "Professional", min:    0, color: "#7ec8ce" },
-];
-function getGroup(rating) {
-  var r = Number(rating);
-  if (!isFinite(r) || r < 0) return GROUPS[GROUPS.length - 1];
-  for (var i = 0; i < GROUPS.length; i++) {
-    if (r >= GROUPS[i].min) return GROUPS[i];
-  }
-  return GROUPS[GROUPS.length - 1];
-}
-function calcDelta(series, days) {
-  if (!series || series.length < 2) return null;
-  var last = series[series.length - 1];
-  var lastDate = new Date(last.date);
-
-  var monthStart = new Date(lastDate.getFullYear(), lastDate.getMonth(), 1);
-  var currentMonth = series.filter(function(p) { return new Date(p.date) >= monthStart; });
-  if (currentMonth.length < 2) return null;
-
-  var target = new Date(lastDate);
-  target.setDate(target.getDate() - days);
-  var effectiveFrom = target > monthStart ? target : monthStart;
-
-  // Default base = first point of month (the START value)
-  var base = currentMonth[0];
-
-  if (effectiveFrom > monthStart) {
-    for (var i = 0; i < currentMonth.length - 1; i++) {
-      if (new Date(currentMonth[i].date) <= effectiveFrom) base = currentMonth[i];
-    }
-  }
-
-  if (base === last) return null;
-  return last.rating - base.rating;
-}
 
 /* ===== State ===== */
 const st = {
@@ -69,6 +15,11 @@ const st = {
   openPickerNick: null,
   currentTab: "players",
   adminEmail: "",
+  session: null,       // { access_token, refresh_token, expires_at, email }
+  groups: [],          // normalized rating groups from the engine, sorted by min desc
+  loadErrors: {},      // read failures of loadAdminData, by source
+  avatarVersions: {},  // nick -> version, set after an avatar upload in this session
+  resetSaving: false,
 };
 
 /* ===== DOM refs ===== */
@@ -84,35 +35,160 @@ const totalVisible  = document.getElementById("totalVisible");
 const totalHidden   = document.getElementById("totalHidden");
 const adminSearch   = document.getElementById("adminSearch");
 
-/* ===== Cookie helpers ===== */
-function setCookie(name, value, days) {
-  var exp = new Date(Date.now() + days * 864e5).toUTCString();
-  document.cookie = name + "=" + value + "; expires=" + exp + "; path=/; SameSite=Strict";
+/* ===== Session (Supabase Auth) =====
+ * The session lives in localStorage[ADMIN_SESSION_KEY]. Every admin request sends its
+ * access token; the database policies decide what the account may do. */
+var SESSION_EXPIRED_MSG = "Session expired. Log in again.";
+var refreshInFlight = null;
+
+function sessionFromAuth(data, fallbackEmail) {
+  var now = Math.floor(Date.now() / 1000);
+  var expiresAt = Number(data.expires_at);
+  if (!Number.isFinite(expiresAt)) expiresAt = now + (Number(data.expires_in) || 3600);
+  return {
+    access_token: data.access_token,
+    refresh_token: data.refresh_token,
+    expires_at: expiresAt,
+    email: (data.user && data.user.email) || fallbackEmail || "",
+  };
 }
-function getCookie(name) {
-  var m = document.cookie.match("(?:^|; )" + name + "=([^;]*)");
-  return m ? m[1] : null;
+
+function readStoredSession() {
+  try {
+    var s = JSON.parse(localStorage.getItem(ADMIN_SESSION_KEY) || "null");
+    return s && s.access_token && s.refresh_token ? s : null;
+  } catch (e) {
+    return null;
+  }
 }
-function deleteCookie(name) {
-  document.cookie = name + "=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/";
+
+function storeSession(s) {
+  st.session = s;
+  st.adminEmail = s.email || "";
+  try { localStorage.setItem(ADMIN_SESSION_KEY, JSON.stringify(s)); }
+  catch (e) { console.warn("Could not store the admin session:", e); }
+}
+
+function clearSession() {
+  st.session = null;
+  st.adminEmail = "";
+  try { localStorage.removeItem(ADMIN_SESSION_KEY); } catch (e) { /* storage unavailable */ }
+}
+
+/* A valid access token, refreshed first when it expires within a minute. */
+async function getAccessToken() {
+  if (!st.session) throw new Error("Not logged in.");
+  /* Another tab may already have refreshed (and so rotated) the session. */
+  var stored = readStoredSession();
+  if (stored && Number(stored.expires_at) > Number(st.session.expires_at)) {
+    st.session = stored;
+    st.adminEmail = stored.email || "";
+  }
+  if (!(Number(st.session.expires_at) - 60 > Math.floor(Date.now() / 1000))) return refreshSession();
+  return st.session.access_token;
+}
+
+/* Single flight: concurrent callers share one refresh request. When the auth server rejects
+ * the refresh token, the session ends and the login screen comes back. */
+function refreshSession() {
+  if (!refreshInFlight) {
+    refreshInFlight = (async function() {
+      var current = st.session;
+      if (!current) throw new Error("Not logged in.");
+      var res = await fetch(SUPABASE.URL + "/auth/v1/token?grant_type=refresh_token", {
+        method: "POST",
+        headers: { apikey: SUPABASE.KEY, "Content-Type": "application/json" },
+        body: JSON.stringify({ refresh_token: current.refresh_token }),
+      });
+      var data = await res.json().catch(function() { return null; });
+      /* Signed out, logged in again or adopted from another tab meanwhile: keep that state
+       * instead of ending or overwriting it with the result for the old session. */
+      if (st.session !== current) {
+        if (!st.session) throw new Error("Not logged in.");
+        return st.session.access_token;
+      }
+      if (res.status === 400 || res.status === 401 || res.status === 403) {
+        sessionExpired();
+        throw new Error(SESSION_EXPIRED_MSG);
+      }
+      if (!res.ok || !data || !data.access_token) throw new Error("Session refresh failed: HTTP " + res.status);
+      storeSession(sessionFromAuth(data, current.email));
+      return st.session.access_token;
+    })().finally(function() { refreshInFlight = null; });
+  }
+  return refreshInFlight;
+}
+
+function sessionExpired() {
+  clearSession();
+  closeAchievementPicker();
+  setAdminLoading(false);
+  panelSection.style.display = "none";
+  loginSection.style.display = "";
+  showLoginError(SESSION_EXPIRED_MSG);
+}
+
+/* ===== Supabase requests =====
+ * The one helper for every admin REST and Storage call, reads and writes. `path` starts
+ * with /rest/v1/ or /storage/v1/. opts: method, body (sent as JSON), raw + contentType (a
+ * file upload), prefer (Prefer header), headers. A 401 refreshes the token once and retries.
+ * Throws an Error with .status on a non-2xx response; returns parsed JSON, or null for an
+ * empty body. */
+async function adminRequest(path, opts) {
+  opts = opts || {};
+  var extra = Object.assign({}, opts.headers);
+  var body;
+  if (opts.raw !== undefined) {
+    body = opts.raw;
+    extra["Content-Type"] = opts.contentType || "application/octet-stream";
+  } else if (opts.body !== undefined) {
+    body = JSON.stringify(opts.body);
+    extra["Content-Type"] = "application/json";
+  }
+  if (opts.prefer) extra.Prefer = opts.prefer;
+
+  function send(token) {
+    return fetch(SUPABASE.URL + path, { method: opts.method || "GET", headers: sbHeaders(token, extra), body: body });
+  }
+
+  var res = await send(await getAccessToken());
+  if (res.status === 401) {
+    res = await send(await refreshSession());
+    if (res.status === 401) {
+      sessionExpired();
+      throw Object.assign(new Error(SESSION_EXPIRED_MSG), { status: 401 });
+    }
+  }
+  var text = await res.text();
+  if (!res.ok) throw Object.assign(new Error("HTTP " + res.status + (text ? ": " + text : "")), { status: res.status });
+  if (!text) return null;
+  try { return JSON.parse(text); } catch (e) { return text; }
+}
+
+/* For deletes and updates sent with Prefer: return=representation that must hit a row. */
+function requireRows(rows) {
+  if (!Array.isArray(rows) || !rows.length) throw new Error("Not found or not permitted");
+  return rows;
 }
 
 /* ===== Auth ===== */
+var loginPending = false;
+
 async function tryLogin() {
+  if (loginPending) return;
   loginError.style.display = "none";
-  loginBtn.disabled = true;
-  loginBtn.textContent = "Checking…";
 
   var email    = emailInput ? emailInput.value.trim() : "";
   var password = passwordInput.value;
 
   if (!email || !password) {
-    loginBtn.disabled = false;
-    loginBtn.textContent = "Log in";
     showLoginError("Enter email and password.");
     return;
   }
 
+  loginPending = true;
+  loginBtn.disabled = true;
+  loginBtn.textContent = "Checking…";
   try {
     var res = await fetch(SUPABASE.URL + "/auth/v1/token?grant_type=password", {
       method: "POST",
@@ -122,22 +198,51 @@ async function tryLogin() {
       },
       body: JSON.stringify({ email: email, password: password }),
     });
-    var data = await res.json();
-    if (!res.ok || !data.access_token) {
+    var data = await res.json().catch(function() { return null; });
+    if (!res.ok || !data || !data.access_token) {
       showLoginError("Invalid email or password.");
       return;
     }
-    setCookie(ADMIN_CFG.COOKIE, "1", 7);
-    setCookie("esb_admin_email", email, 7);
-    st.adminEmail = email;
-    writeLog("Logged in", email);
+    storeSession(sessionFromAuth(data, email));
+    if (!(await checkIsAdmin())) {
+      await endSession();
+      showLoginError("This account is not an admin.");
+      return;
+    }
+    if (!st.session) return; // the check ended the session
+    passwordInput.value = "";
+    writeLog("Logged in", st.adminEmail);
     enterPanel();
   } catch (e) {
     console.error("Login error:", e);
     showLoginError("Connection error. Try again.");
   } finally {
+    loginPending = false;
     loginBtn.disabled = false;
     loginBtn.textContent = "Log in";
+  }
+}
+
+/* False only when the server says the account is not an admin. If the call itself fails
+ * (for example is_admin() does not exist before the RLS migration), the login continues. */
+async function checkIsAdmin() {
+  try {
+    return (await adminRequest("/rest/v1/rpc/is_admin", { method: "POST", body: {} })) !== false;
+  } catch (e) {
+    console.warn("is_admin check failed, continuing:", e);
+    return true;
+  }
+}
+
+/* Forget the session here and, best effort, on the server. */
+async function endSession() {
+  var token = st.session && st.session.access_token;
+  clearSession();
+  if (!token) return;
+  try {
+    await fetch(SUPABASE.URL + "/auth/v1/logout?scope=local", { method: "POST", headers: sbHeaders(token) });
+  } catch (e) {
+    console.warn("Logout request failed:", e);
   }
 }
 
@@ -147,19 +252,18 @@ function showLoginError(msg) {
   passwordInput.value = "";
   passwordInput.focus();
 }
-function logout() {
-  writeLog("Logged out", st.adminEmail || null);
-  deleteCookie(ADMIN_CFG.COOKIE);
-  deleteCookie("esb_admin_email");
-  st.adminEmail = "";
-  setTimeout(function() { location.reload(); }, 300);
+async function logout() {
+  if (logoutBtn) logoutBtn.disabled = true;
+  await writeLog("Logged out", st.adminEmail || null);
+  await endSession();
+  location.reload();
 }
 
 /* ===== Panel ===== */
 function setAdminLoading(on) {
   var ov = document.getElementById("adminLoadingOverlay");
   if (ov) ov.classList.toggle("hidden", !on);
-  document.body.style.overflow = on ? "hidden" : "";
+  document.documentElement.style.overflow = on ? "hidden" : "";
 }
 
 function enterPanel() {
@@ -171,43 +275,46 @@ function enterPanel() {
 
 async function loadAdminData() {
   playerList.innerHTML = '<p class="loading-msg">Loading player data...</p>';
+  st.loadErrors = {};
+  renderLoadErrors();
 
-  try {
-    var res = await fetch(
-      SUPABASE.URL + "/rest/v1/hidden_players?select=nick",
-      { headers: { apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY } }
-    );
-    var rows = await res.json();
-    st.hiddenNicks = new Set(Array.isArray(rows) ? rows.map(function(r) { return r.nick; }) : []);
-  } catch (e) {
-    console.warn("Supabase hidden load failed:", e);
-    st.hiddenNicks = new Set();
+  /* Records a failed read under `key` and reports whether it failed. */
+  function failed(result, key, message) {
+    if (result.status === "fulfilled") return false;
+    console.error(message, result.reason);
+    st.loadErrors[key] = message + " " + ((result.reason && result.reason.message) || result.reason);
+    return true;
+  }
+  function rowsOf(result) {
+    return Array.isArray(result.value) ? result.value : [];
   }
 
-  await loadAchievements();
-  await loadAllPlayerAchievements();
-  renderAchievementsTab();
-
   try {
-    /* Load players from player_config + current ratings from engine */
-    var [configRes, ratingsResult] = await Promise.allSettled([
-      fetch(
-        SUPABASE.URL + "/rest/v1/player_config?select=nickname,initial_rating&order=nickname.asc",
-        { headers: { apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY } }
-      ).then(function(r) {
-        if (!r.ok) throw new Error("Player config request failed: HTTP " + r.status);
-        return r.json();
-      }),
+    /* Load players from player_config + current ratings from engine, with the rest alongside */
+    var [configRes, ratingsResult, hiddenRes, achRes, playerAchRes] = await Promise.allSettled([
+      adminRequest("/rest/v1/player_config?select=nickname,initial_rating&order=nickname.asc"),
       typeof buildRatings === "function"
         ? buildRatings()
         : Promise.reject(new Error("Rating engine is unavailable")),
+      adminRequest("/rest/v1/hidden_players?select=nick"),
+      adminRequest("/rest/v1/achievements?select=id,name,icon_url,url&order=id.asc"),
+      adminRequest("/rest/v1/player_achievements?select=nick,achievement_id"),
     ]);
 
-    var configPlayers = (configRes.status === "fulfilled" && Array.isArray(configRes.value))
-      ? configRes.value : [];
-    var ratingsData = (ratingsResult.status === "fulfilled") ? ratingsResult.value : null;
-    if (configRes.status === "rejected") console.error("Player config load failed:", configRes.reason);
-    if (ratingsResult.status === "rejected") console.error("Rating calculation failed:", ratingsResult.reason);
+    var configPlayers = failed(configRes, "config", "Could not load players:") ? [] : rowsOf(configRes);
+    var ratingsData = failed(ratingsResult, "engine", "Rating calculation failed (ratings, changes and activity are unavailable):")
+      ? null : ratingsResult.value;
+
+    st.hiddenNicks = new Set(failed(hiddenRes, "hidden", "Could not load hidden players (visibility switches may be wrong):")
+      ? [] : rowsOf(hiddenRes).map(function(r) { return r.nick; }));
+    st.achievements = failed(achRes, "achievements", "Could not load achievements:") ? [] : rowsOf(achRes);
+    st.playerAchievements = {};
+    if (!failed(playerAchRes, "playerAchievements", "Could not load badge assignments:")) {
+      rowsOf(playerAchRes).forEach(function(r) {
+        if (!st.playerAchievements[r.nick]) st.playerAchievements[r.nick] = new Set();
+        st.playerAchievements[r.nick].add(r.achievement_id);
+      });
+    }
 
     /* Build rating lookup from engine */
     var ratingByNick = {};
@@ -220,6 +327,7 @@ async function loadAdminData() {
         seriesByNick[nick] = ratingsData.history[nick];
       });
     }
+    st.groups = ratingsData && Array.isArray(ratingsData.groups) ? ratingsData.groups : [];
 
     st.players = configPlayers.map(function(p) {
       return {
@@ -227,18 +335,51 @@ async function loadAdminData() {
         rating: ratingByNick[p.nickname] ?? null,
         series: seriesByNick[p.nickname] ?? [],
       };
-    }).sort(function(a, b) {
-      var ra = a.rating != null ? a.rating : -Infinity;
-      var rb = b.rating != null ? b.rating : -Infinity;
-      return rb - ra;
     });
+    sortPlayers();
 
+    renderLoadErrors();
+    renderAchievementsTab();
     renderList();
   } catch (err) {
-    playerList.innerHTML = '<p style="color:#ff7676;padding:24px 0;text-align:center;">Failed to load data: ' + escHtml(err.message) + '</p>';
+    playerList.innerHTML = errorHtml("Failed to load data: " + err.message);
   } finally {
     setAdminLoading(false);
   }
+}
+
+function sortPlayers() {
+  st.players.sort(function(a, b) {
+    var ra = a.rating != null ? a.rating : -Infinity;
+    var rb = b.rating != null ? b.rating : -Infinity;
+    return rb - ra;
+  });
+}
+
+/* Load failures that affect the Players tab without emptying it. */
+function renderLoadErrors() {
+  var box = document.getElementById("playerLoadError");
+  if (!box) return;
+  var messages = ["engine", "hidden", "playerAchievements"]
+    .map(function(key) { return st.loadErrors[key]; })
+    .filter(Boolean);
+  box.innerHTML = messages.map(errorHtml).join("");
+  box.style.display = messages.length ? "" : "none";
+}
+
+function errorHtml(message) {
+  return '<p class="load-error">' + escapeHtml(message) + '</p>';
+}
+
+/* A finite number as text, or "" — keeps database values out of markup. */
+function numOrEmpty(value) {
+  var n = Number(value);
+  return value === null || value === undefined || value === "" || !Number.isFinite(n) ? "" : String(n);
+}
+
+/* The rating group of `rating` (st.groups comes from the engine), or null without groups. */
+function groupOf(rating) {
+  return st.groups.length ? groupForRating(rating, st.groups) : null;
 }
 
 /* ===== Tab switching ===== */
@@ -253,7 +394,7 @@ function switchTab(tab) {
   });
   if (tab === "dashboard") renderDashboard();
   if (tab === "log") loadLog();
-  if (tab === "groups") loadGroups().then(renderGroupsTab);
+  if (tab === "groups") loadGroupsTab();
   if (tab === "reset") loadResetTab();
   if (tab === "adjustments") loadAdjustmentsTab();
   if (tab === "formula") loadFormulaSettings();
@@ -265,40 +406,53 @@ var FORMULA_FIELDS = {
   DrawMin: "formulaDrawMin", DrawMax: "formulaDrawMax",
 };
 async function loadFormulaSettings() {
+  /* Save stays off until the stored values are on screen, so a failed load cannot
+   * overwrite them with the form's defaults. */
+  var btn = document.getElementById("saveFormulaBtn");
+  if (btn) btn.disabled = true;
   try {
-    var res = await fetch(SUPABASE.URL + "/rest/v1/settings?select=key,value", {
-      headers: { apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY },
-    });
-    if (!res.ok) throw new Error(await res.text());
-    var rows = await res.json();
+    var rows = await adminRequest("/rest/v1/settings?select=key,value");
     var values = {};
-    rows.forEach(function(r) { values[r.key] = r.value; });
+    (Array.isArray(rows) ? rows : []).forEach(function(r) { values[r.key] = r.value; });
     var defaults = { WinMin: 3, WinMax: 3, DrawMin: 1, DrawMax: 1 };
     Object.keys(FORMULA_FIELDS).forEach(function(key) {
       var input = document.getElementById(FORMULA_FIELDS[key]);
       if (input) input.value = values[key] ?? defaults[key];
     });
+    if (btn) btn.disabled = false;
   } catch (err) {
-    showFormulaMessage("Could not load settings: " + err.message, true);
+    showFormulaMessage("Could not load settings: " + err.message + " Saving is disabled until they load.", true);
   }
 }
 async function saveFormulaSettings() {
   var btn = document.getElementById("saveFormulaBtn");
   var records = [];
+  var numbers = {};
   for (var key of Object.keys(FORMULA_FIELDS)) {
     var input = document.getElementById(FORMULA_FIELDS[key]);
     var value = input ? input.value.trim() : "";
-    if (!value || !isFinite(Number(value))) { showFormulaMessage("Enter valid values for all numeric fields.", true); return; }
+    var num = Number(value);
+    if (!value || !Number.isFinite(num) || num < 0) { showFormulaMessage("Enter a number of 0 or more in every field.", true); return; }
+    numbers[key] = num;
     records.push({ key: key, value: value });
+  }
+  /* The engine awards min + k points for a whole number k (up to max), so the range must be whole. */
+  var ranges = [["Win", numbers.WinMin, numbers.WinMax], ["Draw", numbers.DrawMin, numbers.DrawMax]];
+  for (var i = 0; i < ranges.length; i++) {
+    var label = ranges[i][0], lo = ranges[i][1], hi = ranges[i][2];
+    if (lo > hi) { showFormulaMessage(label + " min must not be greater than " + label.toLowerCase() + " max.", true); return; }
+    if (!Number.isInteger(hi - lo)) {
+      showFormulaMessage(label + ": max − min must be a whole number. Each match awards min + 0, 1, 2 … points up to max, so 2.5–4.5 works but 2.5–3 does not.", true);
+      return;
+    }
   }
   btn.disabled = true;
   try {
-    var res = await fetch(SUPABASE.URL + "/rest/v1/settings?on_conflict=key", {
+    await adminRequest("/rest/v1/settings?on_conflict=key", {
       method: "POST",
-      headers: { apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY, "Content-Type": "application/json", Prefer: "resolution=merge-duplicates,return=minimal" },
-      body: JSON.stringify(records),
+      body: records,
+      prefer: "resolution=merge-duplicates,return=minimal",
     });
-    if (!res.ok) throw new Error(await res.text());
     writeLog("Rating formula updated", records.map(function(r) { return r.key + "=" + r.value; }).join(", "));
     showFormulaMessage("✓ Saved. Reload the site to apply.", false);
   } catch (err) {
@@ -352,9 +506,23 @@ function getResetDate() {
   return year + "-" + month + "-01";
 }
 
+/* Save works only for a list that finished loading, and saves to the date it was loaded for
+ * (resetList's data-reset-date). */
+function updateResetSaveBtn() {
+  var btn = document.getElementById("applyResetBtn");
+  var container = document.getElementById("resetList");
+  if (btn) btn.disabled = st.resetSaving || !(container && container.dataset.resetDate);
+}
+
+var resetLoadSeq = 0;
+
 async function loadResetPlayers() {
   var container = document.getElementById("resetList");
   if (!container) return;
+
+  var seq = ++resetLoadSeq;
+  delete container.dataset.resetDate;
+  updateResetSaveBtn();
 
   var dateVal = getResetDate();
   if (!dateVal) {
@@ -373,22 +541,31 @@ async function loadResetPlayers() {
 
   try {
     // Fetch players and any existing resets for this date in parallel
-    var [playersRes, existingRes] = await Promise.all([
-      fetch(SUPABASE.URL + "/rest/v1/player_config?select=nickname,initial_rating&order=nickname.asc",
-        { headers: { apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY } }),
-      fetch(SUPABASE.URL + "/rest/v1/rating_adjustments?applied_date=eq." + dateVal + "&reason=eq.monthly_reset&select=nickname,new_rating",
-        { headers: { apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY } }),
+    var [playersRes, existingRes] = await Promise.allSettled([
+      adminRequest("/rest/v1/player_config?select=nickname,initial_rating&order=nickname.asc"),
+      adminRequest("/rest/v1/rating_adjustments?applied_date=eq." + dateVal + "&reason=eq.monthly_reset&select=id,nickname,new_rating&order=id.asc"),
     ]);
+    if (seq !== resetLoadSeq) return; // a newer load replaced this one
 
-    var players  = await playersRes.json();
-    var existing = await existingRes.json();
+    if (playersRes.status === "rejected") {
+      container.innerHTML = errorHtml("Could not load players: " + playersRes.reason.message);
+      return;
+    }
+    if (existingRes.status === "rejected") {
+      container.innerHTML = errorHtml("Could not load the saved reset for " + dateVal + ": " + existingRes.reason.message +
+        ". Saving is disabled so the saved values are not overwritten.");
+      return;
+    }
+
+    var players  = playersRes.value;
+    var existing = existingRes.value;
 
     if (!Array.isArray(players) || !players.length) {
       container.innerHTML = '<p class="loading-msg">No players found.</p>';
       return;
     }
 
-    // Build existing ratings map: nickname → new_rating
+    // Build existing ratings map: nickname → new_rating (the highest id wins, as in the engine)
     var existingMap = {};
     if (Array.isArray(existing)) {
       existing.forEach(function(e) { existingMap[e.nickname] = e.new_rating; });
@@ -411,33 +588,31 @@ async function loadResetPlayers() {
       var savedRating = existingMap[p.nickname];
       var displayRating = savedRating != null ? savedRating : p.initial_rating;
 
-      var supUrl = SUPABASE.URL + "/storage/v1/object/public/" + SUPABASE.BUCKET + "/" + encodeURIComponent(p.nickname) + ".png";
-      var uiUrl  = "https://ui-avatars.com/api/?name=" + encodeURIComponent(p.nickname) + "&background=0b1f17&color=35c07a&size=64&bold=true&format=png";
-
       var row = document.createElement("div");
       row.className = "player-row";
       row.dataset.nick = p.nickname;
       row.innerHTML =
         '<div class="player-row-info">' +
-          '<img class="player-row-avatar" src="' + escAttr(supUrl) + '" alt="' + escAttr(p.nickname) + '" />' +
+          '<img class="player-row-avatar" alt="' + escapeHtml(p.nickname) + '" />' +
           '<div>' +
-            '<div class="player-row-nick">' + escHtml(p.nickname) + '</div>' +
-            '<div class="player-row-rating" style="font-size:11px;opacity:0.5;">base: ' + p.initial_rating + '</div>' +
+            '<div class="player-row-nick">' + escapeHtml(p.nickname) + '</div>' +
+            '<div class="player-row-rating" style="font-size:11px;opacity:0.5;">base: ' + escapeHtml(numOrEmpty(p.initial_rating) || "—") + '</div>' +
           '</div>' +
         '</div>' +
         '<div class="row-actions" style="gap:8px;">' +
           (savedRating != null ? '<span style="font-size:11px;color:var(--accent);opacity:0.8;">saved</span>' : '') +
           '<label style="font-size:12px;opacity:0.5;white-space:nowrap;">Start rating</label>' +
-          '<input type="number" class="reset-rating-input group-min-input" value="' + displayRating + '" min="0" step="0.5" style="width:90px;text-align:right;" />' +
+          '<input type="number" class="reset-rating-input group-min-input" value="' + numOrEmpty(displayRating) + '" min="0" step="0.5" style="width:90px;text-align:right;" />' +
         '</div>';
 
-      var img = row.querySelector(".player-row-avatar");
-      img.onerror = function() { img.onerror = null; img.src = uiUrl; };
+      setAvatar(row.querySelector(".player-row-avatar"), p.nickname, 64, avatarSrc(p.nickname));
       frag.appendChild(row);
     });
     container.appendChild(frag);
+    container.dataset.resetDate = dateVal;
+    updateResetSaveBtn();
   } catch (e) {
-    container.innerHTML = '<p style="color:#ff7676;">Error: ' + escHtml(e.message) + '</p>';
+    container.innerHTML = errorHtml("Error: " + e.message);
   }
 }
 
@@ -446,15 +621,15 @@ document.addEventListener("DOMContentLoaded", function() {
   if (applyBtn) applyBtn.addEventListener("click", saveMonthlyReset);
 });
 
+/* Insert the new rows first and only then delete the old ones, so a failed insert loses
+ * nothing. Same-day rows are applied in id order, so the new rows win even if the cleanup fails. */
 async function saveMonthlyReset() {
-  var dateVal = getResetDate();
-  if (!dateVal) { alert("Please select year and month."); return; }
+  var container = document.getElementById("resetList");
+  var dateVal = container && container.dataset.resetDate;
+  if (!dateVal) { alert("Wait until the player list for the selected month has loaded."); return; }
 
-  var rows = document.querySelectorAll("#resetList [data-nick]");
+  var rows = container.querySelectorAll("[data-nick]");
   if (!rows.length) { alert("No players loaded."); return; }
-
-  var btn = document.getElementById("applyResetBtn");
-  btn.disabled = true; btn.textContent = "Saving…";
 
   var records = [];
   rows.forEach(function(row) {
@@ -464,26 +639,42 @@ async function saveMonthlyReset() {
       records.push({ nickname: nick, new_rating: rating, applied_date: dateVal, reason: "monthly_reset" });
     }
   });
+  if (!records.length) { alert("Enter at least one starting rating before saving."); return; }
+
+  var btn = document.getElementById("applyResetBtn");
+  st.resetSaving = true;
+  updateResetSaveBtn();
+  btn.textContent = "Saving…";
 
   try {
-    // Delete existing monthly_reset entries for this date first
-    await fetch(
-      SUPABASE.URL + "/rest/v1/rating_adjustments?applied_date=eq." + dateVal + "&reason=eq.monthly_reset",
-      { method: "DELETE", headers: { apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY } }
-    );
-
-    // Insert new ones
-    var res = await fetch(SUPABASE.URL + "/rest/v1/rating_adjustments", {
-      method: "POST",
-      headers: {
-        apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY,
-        "Content-Type": "application/json", Prefer: "resolution=ignore-duplicates",
-      },
-      body: JSON.stringify(records),
-    });
-    if (!res.ok) throw new Error("HTTP " + res.status);
-
+    var inserted;
+    try {
+      inserted = await adminRequest("/rest/v1/rating_adjustments", {
+        method: "POST",
+        body: records,
+        prefer: "return=representation",
+      });
+    } catch (e) {
+      throw new Error(e.message + "\nNothing was deleted; the previously saved reset is unchanged.");
+    }
+    var newIds = (Array.isArray(inserted) ? inserted : [])
+      .map(function(r) { return Number(r.id); })
+      .filter(function(id) { return Number.isInteger(id); });
+    if (newIds.length !== records.length) {
+      throw new Error("The server did not confirm the new rows, so the old ones were kept. Reload the tab and check the saved values.");
+    }
     writeLog("Monthly reset saved", dateVal + " — " + records.length + " players");
+
+    try {
+      await adminRequest(
+        "/rest/v1/rating_adjustments?applied_date=eq." + dateVal + "&reason=eq.monthly_reset&id=not.in.(" + newIds.join(",") + ")",
+        { method: "DELETE" }
+      );
+    } catch (e) {
+      alert("The new reset for " + dateVal + " was saved, but the previous rows could not be removed: " + e.message +
+        "\nThe new values still apply (same-day rows are applied in id order). Save again to clean up.");
+    }
+
     var msg = document.getElementById("resetMsg");
     if (msg) { msg.style.display = "inline"; setTimeout(function() { msg.style.display = "none"; }, 2500); }
 
@@ -492,50 +683,51 @@ async function saveMonthlyReset() {
   } catch (e) {
     alert("Error: " + e.message);
   } finally {
-    btn.disabled = false; btn.textContent = "💾 Save Reset";
+    st.resetSaving = false;
+    btn.textContent = "💾 Save Reset";
+    updateResetSaveBtn();
   }
 }
 
 /* ===== Rating Adjustments ===== */
+/* Player options come from st.players, so added and deleted players show up on the next open. */
+function fillAdjNickSelect() {
+  var select = document.getElementById("adjNick");
+  if (!select) return;
+  var selected = select.value;
+  var nicks = st.players.map(function(p) { return p.nick; }).sort(function(a, b) { return a.localeCompare(b); });
+  select.replaceChildren();
+  nicks.forEach(function(nick) {
+    var opt = document.createElement("option");
+    opt.value = nick;
+    opt.textContent = nick;
+    select.appendChild(opt);
+  });
+  if (nicks.indexOf(selected) !== -1) select.value = selected;
+}
+
+var ADJ_LIST_LIMIT = 200;
+
 async function loadAdjustmentsTab() {
   var container = document.getElementById("adjList");
   if (!container) return;
   container.innerHTML = '<p class="loading-msg">Loading…</p>';
 
   // Populate player select
-  var select = document.getElementById("adjNick");
-  if (select && !select.options.length) {
-    try {
-      var pRes = await fetch(
-        SUPABASE.URL + "/rest/v1/player_config?select=nickname&order=nickname.asc",
-        { headers: { apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY } }
-      );
-      var players = await pRes.json();
-      if (Array.isArray(players)) {
-        players.forEach(function(p) {
-          var opt = document.createElement("option");
-          opt.value = p.nickname;
-          opt.textContent = p.nickname;
-          select.appendChild(opt);
-        });
-      }
-    } catch (e) { console.warn("Players load failed:", e); }
-  }
+  fillAdjNickSelect();
 
-  // Default date = today
+  // Default date = today (local)
   var adjDate = document.getElementById("adjDate");
-  if (adjDate && !adjDate.value) adjDate.value = new Date().toISOString().slice(0, 10);
+  if (adjDate && !adjDate.value) adjDate.value = localIsoDate();
 
-  // Load existing adjustments
+  // Load existing manual adjustments (monthly resets live in the Monthly Reset tab)
   try {
-    var res = await fetch(
-      SUPABASE.URL + "/rest/v1/rating_adjustments?select=*&order=applied_date.desc,id.desc&limit=100",
-      { headers: { apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY } }
+    var rows = await adminRequest(
+      "/rest/v1/rating_adjustments?select=*&or=(reason.is.null,reason.neq.monthly_reset)&order=applied_date.desc,id.desc&limit=" + ADJ_LIST_LIMIT
     );
-    var rows = await res.json();
-    renderAdjustmentsList(rows);
+    renderAdjustmentsList(Array.isArray(rows) ? rows : []);
   } catch (e) {
-    container.innerHTML = '<p style="color:#ff7676;">Error: ' + escHtml(e.message) + '</p>';
+    container.innerHTML = errorHtml("Could not load adjustments: " + e.message);
   }
 }
 
@@ -544,6 +736,7 @@ function renderAdjustmentsList(rows) {
   if (!container) return;
   if (!rows.length) { container.innerHTML = '<p class="loading-msg">No adjustments yet.</p>'; return; }
   container.innerHTML =
+    (rows.length >= ADJ_LIST_LIMIT ? '<p class="dash-h3" style="margin-top:0;">Showing the latest ' + ADJ_LIST_LIMIT + ' manual adjustments.</p>' : '') +
     '<table style="width:100%;border-collapse:collapse;font-size:13px;">' +
     '<thead><tr style="opacity:0.5;text-align:left;">' +
     '<th style="padding:6px 8px;">Date</th><th style="padding:6px 8px;">Player</th>' +
@@ -552,12 +745,12 @@ function renderAdjustmentsList(rows) {
     '<tbody>' +
     rows.map(function(r) {
       return '<tr style="border-top:1px solid rgba(255,255,255,0.06);">' +
-        '<td style="padding:6px 8px;">' + escHtml(r.applied_date) + '</td>' +
-        '<td style="padding:6px 8px;font-weight:600;">' + escHtml(r.nickname) + '</td>' +
-        '<td style="padding:6px 8px;color:var(--accent);">' + r.new_rating + '</td>' +
-        '<td style="padding:6px 8px;opacity:0.6;">' + escHtml(r.reason || "—") + '</td>' +
+        '<td style="padding:6px 8px;">' + escapeHtml(r.applied_date) + '</td>' +
+        '<td style="padding:6px 8px;font-weight:600;">' + escapeHtml(r.nickname) + '</td>' +
+        '<td style="padding:6px 8px;color:var(--accent);">' + escapeHtml(numOrEmpty(r.new_rating)) + '</td>' +
+        '<td style="padding:6px 8px;opacity:0.6;">' + escapeHtml(r.reason || "—") + '</td>' +
         '<td style="padding:6px 8px;">' +
-          '<button class="btn adj-del-btn" data-id="' + r.id + '" type="button" ' +
+          '<button class="btn adj-del-btn" data-id="' + escapeHtml(r.id) + '" type="button" ' +
           'style="font-size:11px;color:#ff7676;padding:3px 8px;">✕</button>' +
         '</td></tr>';
     }).join("") +
@@ -572,11 +765,10 @@ function renderAdjustmentsList(rows) {
 
 async function deleteAdjustment(id) {
   try {
-    var res = await fetch(
-      SUPABASE.URL + "/rest/v1/rating_adjustments?id=eq." + id,
-      { method: "DELETE", headers: { apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY } }
-    );
-    if (!res.ok) throw new Error("HTTP " + res.status);
+    requireRows(await adminRequest("/rest/v1/rating_adjustments?id=eq." + id, {
+      method: "DELETE",
+      prefer: "return=representation",
+    }));
     writeLog("Adjustment deleted", String(id));
     loadAdjustmentsTab();
   } catch (e) { alert("Error: " + e.message); }
@@ -594,15 +786,10 @@ document.addEventListener("DOMContentLoaded", function() {
     addBtn.disabled = true; addBtn.textContent = "Saving…";
 
     try {
-      var res = await fetch(SUPABASE.URL + "/rest/v1/rating_adjustments", {
+      await adminRequest("/rest/v1/rating_adjustments", {
         method: "POST",
-        headers: {
-          apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ nickname: nick, new_rating: rating, applied_date: date, reason: reason || null }),
+        body: { nickname: nick, new_rating: rating, applied_date: date, reason: reason || null },
       });
-      if (!res.ok) throw new Error("HTTP " + res.status);
       writeLog("Adjustment added", nick + " → " + rating + " on " + date);
       document.getElementById("adjRating").value = "";
       document.getElementById("adjReason").value = "";
@@ -615,54 +802,51 @@ document.addEventListener("DOMContentLoaded", function() {
   });
 });
 
-/* ===== Load groups ===== */
-async function loadGroups() {
+/* ===== Groups tab ===== */
+async function loadGroupsTab() {
+  var container = document.getElementById("groupList");
+  if (!container) return;
+  container.innerHTML = '<p class="loading-msg">Loading…</p>';
   try {
-    var res = await fetch(
-      SUPABASE.URL + "/rest/v1/rating_groups?select=*&order=min_rating.desc",
-      { headers: { apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY } }
-    );
-    var rows = await res.json();
-    if (Array.isArray(rows) && rows.length) {
-      GROUPS = rows.map(function(r) {
-        return { id: r.id, name: r.name, min: r.min_rating, color: r.color, coef: Number(r.coef) };
-      });
-    }
+    var rows = await adminRequest("/rest/v1/rating_groups?select=id,name,min_rating,color,coef&order=min_rating.desc");
+    renderGroupsTab(normalizeGroups(rows));
   } catch (e) {
-    console.warn("Groups load failed:", e);
+    container.innerHTML = errorHtml("Could not load groups: " + e.message);
   }
 }
 
 /* ===== Render groups tab ===== */
-function renderGroupsTab() {
+function renderGroupsTab(groups) {
   var container = document.getElementById("groupList");
   if (!container) return;
   container.innerHTML = "";
 
-  if (!GROUPS.length) {
+  if (!groups.length) {
     container.innerHTML = '<p class="loading-msg">No groups found. Run the SQL setup in Supabase first.</p>';
     return;
   }
 
+  var entries = []; // { group, row } in display order
   var frag = document.createDocumentFragment();
-  GROUPS.forEach(function(g) {
+  groups.forEach(function(g) {
+    var color = safeColor(g.color);
     var row = document.createElement("div");
     row.className = "group-row";
     row.innerHTML =
       '<label class="group-color-wrap" title="Click to change colour">' +
-        '<span class="group-color-swatch" style="background:' + escAttr(g.color) + ';"></span>' +
-        '<input class="group-color-input" type="color" value="' + escAttr(g.color) + '" />' +
+        '<span class="group-color-swatch" style="background:' + escapeHtml(color) + ';"></span>' +
+        '<input class="group-color-input" type="color" value="' + escapeHtml(color) + '" />' +
       '</label>' +
-      '<input class="group-name-input" type="text" value="' + escAttr(g.name) + '" placeholder="Group name" />' +
+      '<input class="group-name-input" type="text" value="' + escapeHtml(g.name) + '" placeholder="Group name" />' +
       '<span class="group-min-label">Min rating:</span>' +
-      '<input class="group-min-input" type="number" value="' + g.min + '" min="0" step="1" />' +
+      '<input class="group-min-input" type="number" value="' + numOrEmpty(g.min) + '" min="0" step="1" />' +
       '<span class="group-min-label">Coef:</span>' +
-      '<input class="group-min-input group-coef-input" type="number" value="' + (g.coef ?? 1) + '" step="0.01" />' +
+      '<input class="group-min-input group-coef-input" type="number" value="' + numOrEmpty(g.coef ?? 1) + '" step="0.01" />' +
       '<button class="btn group-save-btn" type="button" style="font-size:13px;background:var(--accent);color:#0b0f14;font-weight:700;flex-shrink:0;">Save</button>';
 
     // Live-update swatch as colour changes
     row.querySelector(".group-color-input").addEventListener("input", function(e) {
-      row.querySelector(".group-color-swatch").style.background = e.target.value;
+      row.querySelector(".group-color-swatch").style.background = safeColor(e.target.value);
     });
 
     row.querySelector(".group-save-btn").addEventListener("click", function() {
@@ -673,42 +857,47 @@ function renderGroupsTab() {
       if (!name) { alert("Name cannot be empty."); return; }
       if (isNaN(min) || min < 0) { alert("Min rating must be a non-negative number."); return; }
       if (!isFinite(coef) || coef <= 0) { alert("Coefficient must be greater than zero."); return; }
-      saveGroup(g.id, name, min, color, coef, g, row);
+      saveGroup(g, name, min, color, coef, row, entries);
     });
 
+    entries.push({ group: g, row: row });
     frag.appendChild(row);
   });
   container.appendChild(frag);
 }
 
-/* ===== Save group ===== */
-async function saveGroup(id, name, minRating, color, coef, groupObj, rowEl) {
+/* ===== Save group =====
+ * Updates only the saved row (other rows keep their unsaved edits), moves rows when the
+ * order changed, and refreshes st.groups for the dashboard and CSV. */
+async function saveGroup(groupObj, name, minRating, color, coef, rowEl, entries) {
   var saveBtn = rowEl.querySelector(".group-save-btn");
   saveBtn.disabled = true; saveBtn.textContent = "Saving…";
   try {
-    var res = await fetch(
-      SUPABASE.URL + "/rest/v1/rating_groups?id=eq." + id,
-      {
-        method: "PATCH",
-        headers: {
-          apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY,
-          "Content-Type": "application/json", Prefer: "return=representation",
-        },
-        body: JSON.stringify({ name: name, min_rating: minRating, color: color, coef: coef }),
-      }
-    );
-    if (!res.ok) { var errBody = await res.text(); throw new Error("HTTP " + res.status + ": " + errBody); }
-    groupObj.name  = name;
-    groupObj.min   = minRating;
-    groupObj.color = color;
-    groupObj.coef = coef;
-    GROUPS.sort(function(a, b) { return b.min - a.min; });
-    writeLog("Group updated", name + " — min:" + minRating + " color:" + color);
+    var rows = requireRows(await adminRequest("/rest/v1/rating_groups?id=eq." + encodeURIComponent(groupObj.id), {
+      method: "PATCH",
+      body: { name: name, min_rating: minRating, color: color, coef: coef },
+      prefer: "return=representation",
+    }));
+    Object.assign(groupObj, normalizeGroups(rows)[0] || { name: name, min: minRating, color: safeColor(color), coef: coef });
+
+    rowEl.querySelector(".group-name-input").value = groupObj.name;
+    rowEl.querySelector(".group-min-input").value = groupObj.min;
+    rowEl.querySelector(".group-coef-input").value = groupObj.coef;
+    rowEl.querySelector(".group-color-input").value = groupObj.color;
+    rowEl.querySelector(".group-color-swatch").style.background = groupObj.color;
+
+    entries.sort(function(a, b) { return b.group.min - a.group.min; });
+    var container = rowEl.parentNode;
+    if (container && entries.some(function(e, i) { return container.children[i] !== e.row; })) {
+      entries.forEach(function(e) { container.appendChild(e.row); });
+    }
+    st.groups = normalizeGroups(entries.map(function(e) { return e.group; }));
+
+    writeLog("Group updated", groupObj.name + " — min:" + groupObj.min + " color:" + groupObj.color);
     saveBtn.textContent = "✓ Saved";
     setTimeout(function() {
       saveBtn.disabled = false;
       saveBtn.textContent = "Save";
-      renderGroupsTab();
     }, 1400);
   } catch (err) {
     alert("Error: " + err.message);
@@ -717,48 +906,14 @@ async function saveGroup(id, name, minRating, color, coef, groupObj, rowEl) {
   }
 }
 
-/* ===== Load achievements ===== */
-async function loadAchievements() {
-  try {
-    var res = await fetch(
-      SUPABASE.URL + "/rest/v1/achievements?select=id,name,icon_url,url&order=id.asc",
-      { headers: { apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY } }
-    );
-    var rows = await res.json();
-    st.achievements = Array.isArray(rows) ? rows : [];
-  } catch (e) {
-    console.warn("Achievements load failed:", e);
-    st.achievements = [];
-  }
-}
-
-async function loadAllPlayerAchievements() {
-  try {
-    var res = await fetch(
-      SUPABASE.URL + "/rest/v1/player_achievements?select=nick,achievement_id",
-      { headers: { apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY } }
-    );
-    var rows = await res.json();
-    st.playerAchievements = {};
-    if (Array.isArray(rows)) {
-      rows.forEach(function(r) {
-        if (!st.playerAchievements[r.nick]) st.playerAchievements[r.nick] = new Set();
-        st.playerAchievements[r.nick].add(r.achievement_id);
-      });
-    }
-  } catch (e) {
-    console.warn("Player achievements load failed:", e);
-  }
-}
-
 /* ===== Render achievements tab ===== */
 function renderAchievementsTab() {
   var container = document.getElementById("achCardList");
   if (!container) return;
-  container.innerHTML = "";
+  container.innerHTML = st.loadErrors.achievements ? errorHtml(st.loadErrors.achievements) : "";
 
   if (!st.achievements.length) {
-    container.innerHTML = '<p class="loading-msg">No achievements yet. Create one below.</p>';
+    if (!st.loadErrors.achievements) container.innerHTML = '<p class="loading-msg">No achievements yet. Create one below.</p>';
     return;
   }
 
@@ -768,15 +923,20 @@ function renderAchievementsTab() {
 }
 
 function makeAchCard(ach) {
+  var href = safeUrl(ach.url);
   var card = document.createElement("div");
   card.className = "ach-card";
   card.dataset.achId = ach.id;
   card.innerHTML =
     '<div class="ach-card-view">' +
-      '<img class="ach-card-icon" src="' + escAttr(ach.icon_url) + '" alt="" />' +
+      '<img class="ach-card-icon" src="' + escapeHtml(safeUrl(ach.icon_url)) + '" alt="" />' +
       '<div class="ach-card-info">' +
-        '<div class="ach-card-name">' + escHtml(ach.name) + '</div>' +
-        '<div class="ach-card-url">' + (ach.url ? '<a href="' + escAttr(ach.url) + '" target="_blank" rel="noopener">' + escHtml(ach.url) + '</a>' : '<span style="opacity:0.4;">No link</span>') + '</div>' +
+        '<div class="ach-card-name">' + escapeHtml(ach.name) + '</div>' +
+        '<div class="ach-card-url">' +
+          (href ? '<a href="' + escapeHtml(href) + '" target="_blank" rel="noopener">' + escapeHtml(ach.url) + '</a>'
+            : ach.url ? '<span style="opacity:0.4;">' + escapeHtml(ach.url) + ' (not an http(s) link)</span>'
+            : '<span style="opacity:0.4;">No link</span>') +
+        '</div>' +
       '</div>' +
       '<div class="ach-card-actions">' +
         '<button class="btn ach-edit-btn" type="button" style="font-size:12px;">✏ Edit</button>' +
@@ -786,11 +946,11 @@ function makeAchCard(ach) {
     '<div class="ach-card-edit" style="display:none;">' +
       '<div class="ach-edit-row">' +
         '<label class="ach-edit-label">Name</label>' +
-        '<input class="ach-edit-name ach-edit-input" type="text" value="' + escAttr(ach.name) + '" />' +
+        '<input class="ach-edit-name ach-edit-input" type="text" value="' + escapeHtml(ach.name) + '" />' +
       '</div>' +
       '<div class="ach-edit-row">' +
         '<label class="ach-edit-label">Link (URL)</label>' +
-        '<input class="ach-edit-url ach-edit-input" type="url" placeholder="https://..." value="' + escAttr(ach.url || "") + '" />' +
+        '<input class="ach-edit-url ach-edit-input" type="url" placeholder="https://..." value="' + escapeHtml(ach.url || "") + '" />' +
       '</div>' +
       '<div class="ach-edit-row">' +
         '<label class="ach-edit-label">Icon</label>' +
@@ -808,7 +968,7 @@ function makeAchCard(ach) {
   /* Edit toggle */
   card.querySelector(".ach-edit-btn").addEventListener("click", function() {
     card.querySelector(".ach-card-view").style.display = "none";
-    card.querySelector(".ach-card-edit").style.display = "block";
+    card.querySelector(".ach-card-edit").style.display = "flex";
   });
   card.querySelector(".ach-cancel-edit-btn").addEventListener("click", function() {
     card.querySelector(".ach-card-view").style.display = "flex";
@@ -828,6 +988,7 @@ function makeAchCard(ach) {
     var url  = card.querySelector(".ach-edit-url").value.trim();
     var file = card.querySelector(".ach-edit-file").files[0] || null;
     if (!name) { alert("Name cannot be empty."); return; }
+    if (url && !safeUrl(url)) { alert("The link must be an http:// or https:// URL."); return; }
     saveAchievementEdit(ach.id, name, url, file, card);
   });
 
@@ -839,48 +1000,41 @@ function makeAchCard(ach) {
   return card;
 }
 
+/* Uploads an achievement icon and returns its public URL. */
+async function uploadAchievementIcon(name, file) {
+  var slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
+  var filename = slug + "_" + Date.now() + ".png";
+  try {
+    await adminRequest("/storage/v1/object/" + SUPABASE.ACH_BUCKET + "/" + filename, {
+      method: "POST",
+      raw: file,
+      contentType: file.type || "image/png",
+      headers: { "x-upsert": "true" },
+    });
+  } catch (err) {
+    throw new Error("Icon upload failed: " + err.message);
+  }
+  return SUPABASE.URL + "/storage/v1/object/public/" + SUPABASE.ACH_BUCKET + "/" + filename;
+}
+
 /* ===== Create achievement ===== */
 async function createAchievement(name, url, file) {
   var saveBtn = document.getElementById("achSaveBtn");
   if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = "Saving…"; }
 
   try {
-    var slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
-    var filename = slug + "_" + Date.now() + ".png";
-    var uploadRes = await fetch(
-      SUPABASE.URL + "/storage/v1/object/" + SUPABASE.ACH_BUCKET + "/" + filename,
-      {
-        method: "POST",
-        headers: {
-          apikey: SUPABASE.KEY,
-          Authorization: "Bearer " + SUPABASE.KEY,
-          "Content-Type": file.type || "image/png",
-          "x-upsert": "true",
-        },
-        body: file,
-      }
-    );
-    if (!uploadRes.ok) {
-      var errText = await uploadRes.text();
-      throw new Error("Icon upload failed: " + errText);
-    }
-    var iconUrl = SUPABASE.URL + "/storage/v1/object/public/" + SUPABASE.ACH_BUCKET + "/" + filename;
+    var iconUrl = await uploadAchievementIcon(name, file);
 
-    var insertRes = await fetch(SUPABASE.URL + "/rest/v1/achievements", {
-      method: "POST",
-      headers: {
-        apikey: SUPABASE.KEY,
-        Authorization: "Bearer " + SUPABASE.KEY,
-        "Content-Type": "application/json",
-        Prefer: "return=representation",
-      },
-      body: JSON.stringify({ name: name, icon_url: iconUrl, url: url || null }),
-    });
-    if (!insertRes.ok) {
-      var errBody = await insertRes.text();
-      throw new Error("DB insert failed: " + errBody);
+    var inserted;
+    try {
+      inserted = await adminRequest("/rest/v1/achievements", {
+        method: "POST",
+        body: { name: name, icon_url: iconUrl, url: url || null },
+        prefer: "return=representation",
+      });
+    } catch (err) {
+      throw new Error("DB insert failed: " + err.message);
     }
-    var inserted = await insertRes.json();
     var newAch = Array.isArray(inserted) ? inserted[0] : inserted;
     st.achievements.push(newAch);
     writeLog("Achievement created", name);
@@ -890,7 +1044,7 @@ async function createAchievement(name, url, file) {
     document.getElementById("achUrlInput").value = "";
     document.getElementById("achIconInput").value = "";
     document.getElementById("achIconName").textContent = "No file";
-    document.getElementById("addAchForm").style.display = "none";
+    document.getElementById("addAchForm").classList.remove("open");
 
     renderAchievementsTab();
     renderList();
@@ -910,51 +1064,22 @@ async function saveAchievementEdit(id, name, url, file, cardEl) {
     var updateData = { name: name, url: url || null };
 
     /* Upload new icon if provided */
-    if (file) {
-      var slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "");
-      var filename = slug + "_" + Date.now() + ".png";
-      var uploadRes = await fetch(
-        SUPABASE.URL + "/storage/v1/object/" + SUPABASE.ACH_BUCKET + "/" + filename,
-        {
-          method: "POST",
-          headers: {
-            apikey: SUPABASE.KEY,
-            Authorization: "Bearer " + SUPABASE.KEY,
-            "Content-Type": file.type || "image/png",
-            "x-upsert": "true",
-          },
-          body: file,
-        }
-      );
-      if (!uploadRes.ok) {
-        var errText = await uploadRes.text();
-        throw new Error("Icon upload failed: " + errText);
-      }
-      updateData.icon_url = SUPABASE.URL + "/storage/v1/object/public/" + SUPABASE.ACH_BUCKET + "/" + filename;
-    }
+    if (file) updateData.icon_url = await uploadAchievementIcon(name, file);
 
-    var res = await fetch(SUPABASE.URL + "/rest/v1/achievements?id=eq." + id, {
-      method: "PATCH",
-      headers: {
-        apikey: SUPABASE.KEY,
-        Authorization: "Bearer " + SUPABASE.KEY,
-        "Content-Type": "application/json",
-        Prefer: "return=representation",
-      },
-      body: JSON.stringify(updateData),
-    });
-    if (!res.ok) {
-      var errBody = await res.text();
-      throw new Error("Update failed: " + errBody);
+    var updated;
+    try {
+      updated = requireRows(await adminRequest("/rest/v1/achievements?id=eq." + encodeURIComponent(id), {
+        method: "PATCH",
+        body: updateData,
+        prefer: "return=representation",
+      }));
+    } catch (err) {
+      throw new Error("Update failed: " + err.message);
     }
 
     /* Update state */
     var idx = st.achievements.findIndex(function(a) { return a.id === id; });
-    if (idx !== -1) {
-      st.achievements[idx].name = name;
-      st.achievements[idx].url = url || null;
-      if (updateData.icon_url) st.achievements[idx].icon_url = updateData.icon_url;
-    }
+    if (idx !== -1) Object.assign(st.achievements[idx], updateData, updated[0]);
     writeLog("Achievement edited", name);
 
     renderAchievementsTab();
@@ -969,11 +1094,10 @@ async function saveAchievementEdit(id, name, url, file, cardEl) {
 async function deleteAchievement(id, cardEl) {
   if (cardEl) cardEl.style.opacity = "0.4";
   try {
-    var res = await fetch(
-      SUPABASE.URL + "/rest/v1/achievements?id=eq." + id,
-      { method: "DELETE", headers: { apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY } }
-    );
-    if (!res.ok) throw new Error("HTTP " + res.status);
+    requireRows(await adminRequest("/rest/v1/achievements?id=eq." + encodeURIComponent(id), {
+      method: "DELETE",
+      prefer: "return=representation",
+    }));
     var delName = (st.achievements.find(function(a){return a.id===id;})||{}).name || String(id);
     writeLog("Achievement deleted", delName);
     st.achievements = st.achievements.filter(function(a) { return a.id !== id; });
@@ -991,7 +1115,10 @@ async function deleteAchievement(id, cardEl) {
 /* ===== Achievement picker (per player) ===== */
 function openAchievementPicker(nick, btnEl) {
   closeAchievementPicker();
-  if (!st.achievements.length) { alert("No achievements yet. Create one in the Achievements tab."); return; }
+  if (!st.achievements.length) {
+    alert(st.loadErrors.achievements || "No achievements yet. Create one in the Achievements tab.");
+    return;
+  }
   st.openPickerNick = nick;
   var picker = document.createElement("div");
   picker.className = "ach-picker";
@@ -1002,11 +1129,11 @@ function openAchievementPicker(nick, btnEl) {
     var item = document.createElement("label");
     item.className = "ach-picker-item";
     item.innerHTML =
-      '<input type="checkbox" ' + (isChecked ? "checked" : "") + ' data-ach-id="' + ach.id + '" />' +
-      '<img src="' + escAttr(ach.icon_url) + '" alt="" />' +
-      '<span>' + escHtml(ach.name) + '</span>';
+      '<input type="checkbox" ' + (isChecked ? "checked" : "") + ' data-ach-id="' + escapeHtml(ach.id) + '" />' +
+      '<img src="' + escapeHtml(safeUrl(ach.icon_url)) + '" alt="" />' +
+      '<span>' + escapeHtml(ach.name) + '</span>';
     item.querySelector("input").addEventListener("change", function(e) {
-      togglePlayerAchievement(nick, ach.id, e.target.checked);
+      togglePlayerAchievement(nick, ach.id, e.target.checked, e.target);
     });
     picker.appendChild(item);
   });
@@ -1034,35 +1161,31 @@ function closeAchievementPicker() {
   st.openPickerNick = null;
 }
 
-async function togglePlayerAchievement(nick, achId, assign) {
+async function togglePlayerAchievement(nick, achId, assign, checkboxEl) {
   if (!st.playerAchievements[nick]) st.playerAchievements[nick] = new Set();
   if (assign) { st.playerAchievements[nick].add(achId); }
   else        { st.playerAchievements[nick].delete(achId); }
   updateTrophyBtn(nick);
   try {
-    var res;
     if (assign) {
-      res = await fetch(SUPABASE.URL + "/rest/v1/player_achievements", {
+      await adminRequest("/rest/v1/player_achievements", {
         method: "POST",
-        headers: {
-          apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY,
-          "Content-Type": "application/json", Prefer: "resolution=merge-duplicates",
-        },
-        body: JSON.stringify({ nick: nick, achievement_id: achId }),
+        body: { nick: nick, achievement_id: achId },
+        prefer: "resolution=merge-duplicates",
       });
     } else {
-      res = await fetch(
-        SUPABASE.URL + "/rest/v1/player_achievements?nick=eq." + encodeURIComponent(nick) + "&achievement_id=eq." + achId,
-        { method: "DELETE", headers: { apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY } }
+      await adminRequest(
+        "/rest/v1/player_achievements?nick=eq." + encodeURIComponent(nick) + "&achievement_id=eq." + encodeURIComponent(achId),
+        { method: "DELETE" }
       );
     }
-    if (!res.ok) { var errBody = await res.text(); throw new Error("HTTP " + res.status + ": " + errBody); }
     var achName = (st.achievements.find(function(a){return a.id===achId;})||{}).name || String(achId);
     writeLog(assign ? "Badge assigned" : "Badge removed", nick + " → " + achName);
   } catch (err) {
     console.error("Toggle achievement failed:", err);
     if (assign) { st.playerAchievements[nick].delete(achId); }
     else        { st.playerAchievements[nick].add(achId); }
+    if (checkboxEl) checkboxEl.checked = !assign;
     updateTrophyBtn(nick);
     alert("Error: " + err.message);
   }
@@ -1078,17 +1201,21 @@ function updateTrophyBtn(nick) {
   btn.title = hasAny ? "Achievements (" + st.playerAchievements[nick].size + ")" : "Add achievement";
 }
 
-/* ===== Avatar URL ===== */
-function supabaseAvatarUrl(nick) {
-  return SUPABASE.URL + "/storage/v1/object/public/" + SUPABASE.BUCKET + "/" + encodeURIComponent(nick) + ".png?t=" + Date.now();
-}
-function uiAvatarUrl(nick) {
-  return "https://ui-avatars.com/api/?name=" + encodeURIComponent(nick) + "&background=0b1f17&color=35c07a&size=64&bold=true&format=png";
+/* ===== Avatar URL =====
+ * The plain public URL, so the browser cache works; after an upload in this session the nick
+ * gets a version so the new picture shows at once. */
+function avatarSrc(nick) {
+  var version = st.avatarVersions[nick];
+  return version ? avatarUrl(nick) + "?v=" + version : avatarUrl(nick);
 }
 
 /* ===== Render players ===== */
 function renderList() {
   updateStats();
+  if (st.loadErrors.config) {
+    playerList.innerHTML = errorHtml(st.loadErrors.config);
+    return;
+  }
   var q = st.searchQuery.toLowerCase().trim();
   var visible = q
     ? st.players.filter(function(p) { return p.nick.toLowerCase().indexOf(q) !== -1; })
@@ -1105,8 +1232,6 @@ function renderList() {
 function makeRow(p) {
   var isHidden    = st.hiddenNicks.has(p.nick);
   var rating      = p.rating != null ? Number(p.rating).toFixed(1) : "—";
-  var supUrl      = supabaseAvatarUrl(p.nick);
-  var uiUrl       = uiAvatarUrl(p.nick);
   var checkedAttr = isHidden ? "" : "checked";
   var labelText   = isHidden ? "Hidden" : "Visible";
   var achCount    = st.playerAchievements[p.nick] ? st.playerAchievements[p.nick].size : 0;
@@ -1118,15 +1243,15 @@ function makeRow(p) {
   row.dataset.nick = p.nick;
   row.innerHTML =
     '<div class="player-row-info">' +
-      '<img class="player-row-avatar" src="' + escAttr(supUrl) + '" alt="' + escAttr(p.nick) + '" loading="lazy" />' +
+      '<img class="player-row-avatar" alt="' + escapeHtml(p.nick) + '" loading="lazy" />' +
       '<div>' +
-        '<div class="player-row-nick">' + escHtml(p.nick) + '</div>' +
-        '<div class="player-row-rating">Rating: ' + escHtml(rating) + '</div>' +
+        '<div class="player-row-nick">' + escapeHtml(p.nick) + '</div>' +
+        '<div class="player-row-rating">Rating: ' + escapeHtml(rating) + '</div>' +
       '</div>' +
     '</div>' +
     '<div class="row-actions">' +
       '<label class="upload-btn" title="Upload photo">📷<input class="avatar-file-input" type="file" accept="image/*" style="display:none" /></label>' +
-      '<button class="' + trophyClass + '" type="button" title="' + escAttr(trophyTitle) + '">🏆</button>' +
+      '<button class="' + trophyClass + '" type="button" title="' + escapeHtml(trophyTitle) + '">🏆</button>' +
       '<label class="toggle" title="' + (isHidden ? "Hidden — click to show" : "Visible — click to hide") + '">' +
         '<input type="checkbox" ' + checkedAttr + ' />' +
         '<span class="toggle-track"><span class="toggle-thumb"></span></span>' +
@@ -1136,7 +1261,7 @@ function makeRow(p) {
     '</div>';
 
   var img = row.querySelector(".player-row-avatar");
-  img.onerror = function() { img.onerror = null; img.src = uiUrl; };
+  setAvatar(img, p.nick, 64, avatarSrc(p.nick));
   var input = row.querySelector(".avatar-file-input");
   input.addEventListener("change", function(e) {
     var file = e.target.files[0];
@@ -1163,20 +1288,18 @@ async function uploadAvatar(nick, file, imgEl) {
   var path = encodeURIComponent(nick) + ".png";
   imgEl.style.opacity = "0.4";
   try {
-    var res = await fetch(
-      SUPABASE.URL + "/storage/v1/object/" + SUPABASE.BUCKET + "/" + path,
-      {
+    try {
+      await adminRequest("/storage/v1/object/" + SUPABASE.AVATAR_BUCKET + "/" + path, {
         method: "POST",
-        headers: {
-          apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY,
-          "Content-Type": file.type || "image/png", "x-upsert": "true",
-        },
-        body: file,
-      }
-    );
-    if (!res.ok) { var errText = await res.text(); throw new Error("Upload failed: " + errText); }
-    imgEl.src = supabaseAvatarUrl(nick);
-    imgEl.onerror = null;
+        raw: file,
+        contentType: file.type || "image/png",
+        headers: { "x-upsert": "true" },
+      });
+    } catch (err) {
+      throw new Error("Upload failed: " + err.message);
+    }
+    st.avatarVersions[nick] = Date.now();
+    setAvatar(imgEl, nick, 64, avatarSrc(nick));
     writeLog("Avatar uploaded", nick);
   } catch (err) {
     console.error(err); alert("Upload error: " + err.message);
@@ -1186,97 +1309,66 @@ async function uploadAvatar(nick, file, imgEl) {
 }
 
 /* ===== Toggle visibility ===== */
-async function onToggle(nick, visible, row) {
+/* Shows `visible` on the row (switch, dimming, label, title) and in st.hiddenNicks. */
+function applyVisibility(nick, visible, row) {
   if (visible) { st.hiddenNicks.delete(nick); } else { st.hiddenNicks.add(nick); }
   row.className = "player-row" + (visible ? "" : " player-row--hidden");
+  var box = row.querySelector(".toggle input");
   var lbl = row.querySelector(".toggle-label");
   var tog = row.querySelector(".toggle");
+  if (box) box.checked = visible;
   if (lbl) lbl.textContent = visible ? "Visible" : "Hidden";
   if (tog) tog.title = visible ? "Visible — click to hide" : "Hidden — click to show";
   updateStats();
+}
+
+async function onToggle(nick, visible, row) {
+  var box = row.querySelector(".toggle input");
+  applyVisibility(nick, visible, row);
+  if (box) box.disabled = true; // one request at a time per switch
   try {
-    var res2;
     if (visible) {
-      res2 = await fetch(
-        SUPABASE.URL + "/rest/v1/hidden_players?nick=eq." + encodeURIComponent(nick),
-        { method: "DELETE", headers: { apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY } }
-      );
+      await adminRequest("/rest/v1/hidden_players?nick=eq." + encodeURIComponent(nick), { method: "DELETE" });
     } else {
-      res2 = await fetch(SUPABASE.URL + "/rest/v1/hidden_players", {
+      await adminRequest("/rest/v1/hidden_players", {
         method: "POST",
-        headers: {
-          apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY,
-          "Content-Type": "application/json", Prefer: "resolution=merge-duplicates",
-        },
-        body: JSON.stringify({ nick: nick }),
+        body: { nick: nick },
+        prefer: "resolution=merge-duplicates",
       });
     }
-    if (!res2.ok) { var errBody = await res2.text(); throw new Error("HTTP " + res2.status + ": " + errBody); }
     writeLog(visible ? "Player shown" : "Player hidden", nick);
   } catch (err) {
     console.error("Supabase error:", err);
-    if (visible) { st.hiddenNicks.add(nick); } else { st.hiddenNicks.delete(nick); }
-    row.className = "player-row" + (visible ? " player-row--hidden" : "");
-    if (lbl) lbl.textContent = visible ? "Hidden" : "Visible";
-    updateStats();
+    applyVisibility(nick, !visible, row);
+    alert("Could not " + (visible ? "show " : "hide ") + nick + ": " + err.message);
+  } finally {
+    if (box) box.disabled = false;
   }
 }
 
+/* Hidden players still in the list (hidden_players can keep rows for deleted players). */
+function hiddenCount() {
+  return st.players.filter(function(p) { return st.hiddenNicks.has(p.nick); }).length;
+}
+
 function updateStats() {
-  var hidden = st.hiddenNicks.size;
+  var hidden = hiddenCount();
   var total  = st.players.length;
   if (totalVisible) totalVisible.textContent = total - hidden;
   if (totalHidden)  totalHidden.textContent  = hidden;
 }
 
-/* ===== JSONP ===== */
-function loadJSONP(url, timeoutMs) {
-  if (!timeoutMs) timeoutMs = 15000;
-  return new Promise(function(resolve, reject) {
-    var cbName = "__adm_cb_" + Date.now() + "_" + Math.floor(Math.random() * 1e6);
-    var script = document.createElement("script");
-    var timer = 0;
-    function cleanup() {
-      try { delete window[cbName]; } catch(e) { window[cbName] = undefined; }
-      if (script.parentNode) script.parentNode.removeChild(script);
-      if (timer) clearTimeout(timer);
-    }
-    window[cbName] = function(data) { cleanup(); resolve(data); };
-    script.src = url + "?callback=" + cbName + "&t=" + Date.now();
-    script.async = true;
-    script.onerror = function() { cleanup(); reject(new Error("JSONP load failed")); };
-    timer = setTimeout(function() { cleanup(); reject(new Error("JSONP timeout")); }, timeoutMs);
-    document.body.appendChild(script);
-  });
-}
-
-/* ===== Utils ===== */
-function escHtml(str) {
-  return String(str).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;").replace(/'/g, "&#039;");
-}
-function escAttr(str) {
-  return String(str).replace(/"/g, "&quot;").replace(/'/g, "&#039;");
-}
-function debounce(fn, ms) {
-  var t = 0;
-  return function() { var args = arguments; clearTimeout(t); t = setTimeout(function() { fn.apply(null, args); }, ms); };
-}
-
 /* ===== Write log ===== */
+/* Never throws: a failed log write only warns in the console. */
 async function writeLog(action, details) {
   try {
-    await fetch(SUPABASE.URL + "/rest/v1/admin_log", {
+    await adminRequest("/rest/v1/admin_log", {
       method: "POST",
-      headers: {
-        apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
+      body: {
         action: action,
         details: details || null,
         email: st.adminEmail || null,
-      }),
+      },
     });
   } catch (e) { console.warn("Log write failed:", e); }
 }
@@ -1287,11 +1379,7 @@ async function loadLog() {
   if (!logList) return;
   logList.innerHTML = '<p class="loading-msg">Loading…</p>';
   try {
-    var res = await fetch(
-      SUPABASE.URL + "/rest/v1/admin_log?select=*&order=created_at.desc&limit=200",
-      { headers: { apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY } }
-    );
-    var rows = await res.json();
+    var rows = await adminRequest("/rest/v1/admin_log?select=*&order=created_at.desc&limit=200");
     if (!Array.isArray(rows) || !rows.length) {
       logList.innerHTML = '<p class="loading-msg">No log entries yet.</p>';
       return;
@@ -1301,16 +1389,16 @@ async function loadLog() {
       var d = new Date(r.created_at);
       var timeStr = d.toLocaleDateString("uk-UA") + " " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
       html += '<tr>' +
-        '<td class="log-time">' + escHtml(timeStr) + '</td>' +
-        '<td class="log-details" style="color:var(--accent);font-size:12px;">' + escHtml(r.email || "—") + '</td>' +
-        '<td class="log-action">' + escHtml(r.action) + '</td>' +
-        '<td class="log-details">' + escHtml(r.details || "—") + '</td>' +
+        '<td class="log-time">' + escapeHtml(timeStr) + '</td>' +
+        '<td class="log-details" style="color:var(--accent);font-size:12px;">' + escapeHtml(r.email || "—") + '</td>' +
+        '<td class="log-action">' + escapeHtml(r.action) + '</td>' +
+        '<td class="log-details">' + escapeHtml(r.details || "—") + '</td>' +
         '</tr>';
     });
     html += '</tbody></table></div>';
     logList.innerHTML = html;
   } catch (e) {
-    logList.innerHTML = '<p style="color:#ff7676;padding:16px 0;text-align:center;">Failed to load log: ' + escHtml(e.message) + '</p>';
+    logList.innerHTML = errorHtml("Failed to load log: " + e.message);
   }
 }
 
@@ -1318,13 +1406,30 @@ async function loadLog() {
 async function clearLog() {
   if (!confirm("Clear entire activity log? This cannot be undone.")) return;
   try {
-    var res = await fetch(
-      SUPABASE.URL + "/rest/v1/admin_log?id=gte.0",
-      { method: "DELETE", headers: { apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY } }
-    );
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    document.getElementById("logList").innerHTML = '<p class="loading-msg">Log cleared.</p>';
-  } catch (e) { alert("Failed to clear log: " + e.message); }
+    await adminRequest("/rest/v1/admin_log?id=gte.0", { method: "DELETE" });
+  } catch (e) { alert("Failed to clear log: " + e.message); return; }
+  await writeLog("Log cleared");
+  loadLog();
+}
+
+/* ===== CSV ===== */
+/* A text cell that a spreadsheet would run as a formula (= + - @ tab CR) gets a leading
+ * apostrophe; plain numbers such as -3.5 or +2.0 stay numbers. */
+function csvCell(value) {
+  var s = String(value ?? "");
+  if (/^[=+\-@\t\r]/.test(s) && !/^[+-]?\d+(\.\d+)?$/.test(s)) s = "'" + s;
+  return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+function downloadCsv(rows, filename) {
+  var csv = rows.map(function(r) { return r.map(csvCell).join(","); }).join("\n");
+  var blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" });
+  var url = URL.createObjectURL(blob);
+  var a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a); a.click();
+  document.body.removeChild(a); URL.revokeObjectURL(url);
 }
 
 /* ===== Export CSV ===== */
@@ -1332,30 +1437,18 @@ function exportCSV() {
   var rows = [["Rank", "Nickname", "Rating", "Δ7d", "Δ1d", "Group", "Status"]];
   var visible = st.players.filter(function(p) { return !st.hiddenNicks.has(p.nick); });
   visible.forEach(function(p, i) {
-    var d7 = calcDelta(p.series, 7);
-    var d1 = calcDelta(p.series, 1);
-    var grp = p.rating != null ? getGroup(p.rating).name : "—";
+    var d7 = monthDelta(p.series, 7);
+    var d1 = monthDelta(p.series, 1);
+    var grp = p.rating != null ? groupOf(p.rating) : null;
     rows.push([
       i + 1, p.nick,
       p.rating != null ? Number(p.rating).toFixed(1) : "—",
       d7 != null ? (d7 > 0 ? "+" : "") + d7.toFixed(1) : "—",
       d1 != null ? (d1 > 0 ? "+" : "") + d1.toFixed(1) : "—",
-      grp, "Visible",
+      grp ? grp.name : "—", "Visible",
     ]);
   });
-  var csv = rows.map(function(r) {
-    return r.map(function(c) {
-      var s = String(c);
-      return (s.includes(",") || s.includes('"') || s.includes("\n")) ? '"' + s.replace(/"/g, '""') + '"' : s;
-    }).join(",");
-  }).join("\n");
-  var blob = new Blob(["﻿" + csv], { type: "text/csv;charset=utf-8;" });
-  var url = URL.createObjectURL(blob);
-  var a = document.createElement("a");
-  a.href = url;
-  a.download = "esb_leaderboard_" + new Date().toISOString().slice(0, 10) + ".csv";
-  document.body.appendChild(a); a.click();
-  document.body.removeChild(a); URL.revokeObjectURL(url);
+  downloadCsv(rows, "esb_leaderboard_" + localIsoDate() + ".csv");
 }
 
 /* ===== Dashboard ===== */
@@ -1364,18 +1457,19 @@ function renderDashboard() {
   if (!sec) return;
 
   var total   = st.players.length;
-  var hidden  = st.hiddenNicks.size;
+  var hidden  = hiddenCount();
   var visible = total - hidden;
   var achCount = st.achievements.length;
   var totalBadges = Object.values(st.playerAchievements).reduce(function(s, set) { return s + set.size; }, 0);
+  var visiblePlayers = st.players.filter(function(p) { return !st.hiddenNicks.has(p.nick); });
 
-  var ratings = st.players
-    .filter(function(p) { return !st.hiddenNicks.has(p.nick) && p.rating != null; })
+  var ratings = visiblePlayers
+    .filter(function(p) { return p.rating != null; })
     .map(function(p) { return p.rating; });
   var avgRating = ratings.length ? (ratings.reduce(function(s, r) { return s + r; }, 0) / ratings.length).toFixed(1) : "—";
   var maxRating = ratings.length ? Math.max.apply(null, ratings).toFixed(1) : "—";
 
-  /* ---- Current month activity ---- */
+  /* ---- Current month ---- */
   var latestDate = "";
   st.players.forEach(function(p) {
     if (p.series && p.series.length) {
@@ -1383,45 +1477,25 @@ function renderDashboard() {
       if (d > latestDate) latestDate = d;
     }
   });
-  var monthPrefix = latestDate ? latestDate.slice(0, 7) : new Date().toISOString().slice(0, 7);
+  var monthPrefix = latestDate ? latestDate.slice(0, 7) : localIsoDate().slice(0, 7);
   var monthName   = latestDate
     ? new Date(latestDate + "T00:00:00").toLocaleString("en", { month: "long", year: "numeric" })
     : "—";
 
-  var gameDatesSet = new Set();
-  var playerActivity = st.players
-    .filter(function(p) { return !st.hiddenNicks.has(p.nick); })
-    .map(function(p) {
-      var month = (p.series || []).filter(function(e) { return e.date.startsWith(monthPrefix); });
-      // index 0 = synthetic start; everything from index 1 = actual game results
-      var gameDays = 0;
-      for (var i = 1; i < month.length; i++) {
-        gameDatesSet.add(month[i].date);
-        gameDays++;
-      }
-      return { nick: p.nick, gameDays: gameDays, played: gameDays > 0 };
-    })
-    .sort(function(a, b) { return b.gameDays - a.gameDays || a.nick.localeCompare(b.nick); });
-
-  var activeCnt   = playerActivity.filter(function(p) { return p.played; }).length;
-  var inactiveCnt = playerActivity.length - activeCnt;
-  var gameDaysCnt = gameDatesSet.size;
-
   /* ---- Movers ---- */
-  var withDelta = st.players
-    .filter(function(p) { return p.series && p.series.length > 1; })
-    .map(function(p) { return { nick: p.nick, delta7: calcDelta(p.series, 7) }; });
+  var withDelta = visiblePlayers
+    .map(function(p) { return { nick: p.nick, delta7: monthDelta(p.series, 7) }; });
 
   var gainers = withDelta.filter(function(p) { return p.delta7 != null && p.delta7 > 0; })
     .sort(function(a, b) { return b.delta7 - a.delta7; }).slice(0, 5);
   var losers  = withDelta.filter(function(p) { return p.delta7 != null && p.delta7 < 0; })
     .sort(function(a, b) { return a.delta7 - b.delta7; }).slice(0, 5);
 
-  var groupDist = GROUPS.map(function(g) {
-    var cnt = st.players.filter(function(p) {
-      return !st.hiddenNicks.has(p.nick) && p.rating != null && getGroup(p.rating).name === g.name;
+  var groupDist = st.groups.map(function(g) {
+    var cnt = visiblePlayers.filter(function(p) {
+      return p.rating != null && groupOf(p.rating) === g;
     }).length;
-    return { name: g.name, color: g.color, count: cnt };
+    return { name: g.name, color: safeColor(g.color), count: cnt };
   }).filter(function(g) { return g.count > 0; });
 
   function moverHtml(list, isGain) {
@@ -1431,40 +1505,30 @@ function renderDashboard() {
       var sign  = isGain ? "+" : "";
       return '<div class="mover-row">' +
         '<span class="mover-rank">' + (i + 1) + '</span>' +
-        '<span class="mover-nick">' + escHtml(p.nick) + '</span>' +
+        '<span class="mover-nick">' + escapeHtml(p.nick) + '</span>' +
         '<span class="mover-delta" style="color:' + color + '">' + sign + p.delta7.toFixed(1) + '</span>' +
         '</div>';
     }).join("");
   }
 
-  /* ---- Activity: all months, rating-change based ---- */
+  /* ---- Activity: all months ---- */
   var allMonthsSet = new Set();
   st.players.forEach(function(p) {
     (p.series || []).forEach(function(e) { allMonthsSet.add(e.date.slice(0, 7)); });
   });
   var sortedMonths = Array.from(allMonthsSet).sort().reverse();
 
-  function calcMonthActivity(prefix) {
-    return st.players                         // all players, including hidden
-      .map(function(p) {
-        var entries = (p.series || []).filter(function(e) { return e.date.startsWith(prefix); });
-        var playedDays = 0, zeroDays = 0;
-        for (var i = 1; i < entries.length; i++) {
-          var d = Math.abs(entries[i].rating - entries[i - 1].rating);
-          if (d > 0.001) playedDays++; else zeroDays++;
-        }
-        return { nick: p.nick, playedDays: playedDays, zeroDays: zeroDays };
-      })
-      .sort(function(a, b) { return b.playedDays - a.playedDays || a.nick.localeCompare(b.nick); });
-  }
-
-  /* summary for current month */
+  /* summary for current month; game days = dates on which any visible player played */
   var curPlayers    = calcMonthActivity(monthPrefix);
   var activeCnt     = curPlayers.filter(function(p) { return p.playedDays > 0; }).length;
   var inactiveCnt   = curPlayers.length - activeCnt;
-  var totalPlayedDays = curPlayers.reduce(function(s, p) { return s + p.playedDays; }, 0);
+  var gameDates     = new Set();
+  curPlayers.forEach(function(p) {
+    if (!st.hiddenNicks.has(p.nick)) p.playedDates.forEach(function(d) { gameDates.add(d); });
+  });
 
   sec.innerHTML =
+    (st.loadErrors.engine ? errorHtml(st.loadErrors.engine) : "") +
     '<div class="dash-grid">' +
       '<div class="dash-card"><div class="dash-card-val">' + visible + '</div><div class="dash-card-label">Visible players</div></div>' +
       '<div class="dash-card"><div class="dash-card-val" style="color:#ff7676">' + hidden + '</div><div class="dash-card-label">Hidden players</div></div>' +
@@ -1481,9 +1545,9 @@ function renderDashboard() {
     groupDist.map(function(g) {
       var pct = visible > 0 ? Math.round(g.count / visible * 100) : 0;
       return '<div class="group-bar-row">' +
-        '<span class="group-bar-dot" style="background:' + g.color + '"></span>' +
-        '<span class="group-bar-name">' + escHtml(g.name) + '</span>' +
-        '<div class="group-bar-track"><div class="group-bar-fill" style="width:' + pct + '%;background:' + g.color + '"></div></div>' +
+        '<span class="group-bar-dot" style="background:' + escapeHtml(g.color) + '"></span>' +
+        '<span class="group-bar-name">' + escapeHtml(g.name) + '</span>' +
+        '<div class="group-bar-track"><div class="group-bar-fill" style="width:' + pct + '%;background:' + escapeHtml(g.color) + '"></div></div>' +
         '<span class="group-bar-count">' + g.count + '</span>' +
         '</div>';
     }).join("") +
@@ -1491,7 +1555,7 @@ function renderDashboard() {
 
     '<p class="dash-h3">📅 Activity by month</p>' +
     '<div class="dash-grid" style="margin-bottom:14px;">' +
-      '<div class="dash-card"><div class="dash-card-val" style="color:#52d18a">' + totalPlayedDays + '</div><div class="dash-card-label">Game days (' + escHtml(monthName.split(' ')[0]) + ')</div></div>' +
+      '<div class="dash-card"><div class="dash-card-val" style="color:#52d18a">' + gameDates.size + '</div><div class="dash-card-label">Game days (' + escapeHtml(monthName.split(' ')[0]) + ')</div></div>' +
       '<div class="dash-card"><div class="dash-card-val" style="color:#52d18a">' + activeCnt + '</div><div class="dash-card-label">Players played</div></div>' +
       '<div class="dash-card"><div class="dash-card-val" style="color:#ff7676">' + inactiveCnt + '</div><div class="dash-card-label">No games</div></div>' +
     '</div>' +
@@ -1515,25 +1579,12 @@ function renderDashboard() {
 }
 
 function exportActivityCSV(prefix, label) {
-  var players = calcMonthActivityGlobal(prefix);
+  var players = calcMonthActivity(prefix);
   var rows = [['Nickname', 'Played days', 'Not played days', 'Total days']];
   players.forEach(function(p) {
     rows.push([p.nick, p.playedDays, p.zeroDays, p.playedDays + p.zeroDays]);
   });
-  var csv = rows.map(function(r) {
-    return r.map(function(c) {
-      var s = String(c);
-      return (s.includes(',') || s.includes('"') || s.includes('\n'))
-        ? '"' + s.replace(/"/g, '""') + '"' : s;
-    }).join(',');
-  }).join('\n');
-  var blob = new Blob(['﻿' + csv], { type: 'text/csv;charset=utf-8;' });
-  var url = URL.createObjectURL(blob);
-  var a = document.createElement('a');
-  a.href = url;
-  a.download = 'activity_' + label.replace(/\s+/g, '_').toLowerCase() + '.csv';
-  document.body.appendChild(a); a.click();
-  document.body.removeChild(a); URL.revokeObjectURL(url);
+  downloadCsv(rows, 'activity_' + label.replace(/\s+/g, '_').toLowerCase() + '.csv');
 }
 
 function buildActivityHtml(sortedMonths) {
@@ -1552,59 +1603,59 @@ function buildActivityHtml(sortedMonths) {
       var d = new Date(prefix + '-01T00:00:00');
       var label = d.toLocaleString('en', { month: 'long' });
       var isMonthOpen = yi === 0 && mi === 0;
-      var players = calcMonthActivityGlobal(prefix);
+      var players = calcMonthActivity(prefix);
       return '<div class="month-section" style="margin-left:0;">' +
         '<div class="month-toggle-row">' +
-          '<button class="month-toggle' + (isMonthOpen ? ' open' : '') + '" data-target="mgrid-' + prefix + '">' +
-            escHtml(label) +
+          '<button class="month-toggle' + (isMonthOpen ? ' open' : '') + '" data-target="mgrid-' + escapeHtml(prefix) + '">' +
+            escapeHtml(label) +
             '<span class="month-arrow">▼</span>' +
           '</button>' +
-          '<button class="act-csv-btn btn" data-prefix="' + prefix + '" data-label="' + escAttr(label + ' ' + year) + '" style="font-size:12px;padding:5px 10px;flex-shrink:0;">📥 CSV</button>' +
+          '<button class="act-csv-btn btn" data-prefix="' + escapeHtml(prefix) + '" data-label="' + escapeHtml(label + ' ' + year) + '" style="font-size:12px;padding:5px 10px;flex-shrink:0;">📥 CSV</button>' +
         '</div>' +
-        '<div class="month-grid' + (isMonthOpen ? ' open' : '') + '" id="mgrid-' + prefix + '">' +
-          monthGridHtmlGlobal(players) +
+        '<div class="month-grid' + (isMonthOpen ? ' open' : '') + '" id="mgrid-' + escapeHtml(prefix) + '">' +
+          monthGridHtml(players) +
         '</div>' +
       '</div>';
     }).join('');
 
     return '<div class="year-section">' +
-      '<button class="year-toggle' + (isYearOpen ? ' open' : '') + '" data-target="ygrid-' + year + '">' +
-        '📆 ' + year +
+      '<button class="year-toggle' + (isYearOpen ? ' open' : '') + '" data-target="ygrid-' + escapeHtml(year) + '">' +
+        '📆 ' + escapeHtml(year) +
         '<span class="month-arrow">▼</span>' +
       '</button>' +
-      '<div class="year-body' + (isYearOpen ? ' open' : '') + '" id="ygrid-' + year + '">' +
+      '<div class="year-body' + (isYearOpen ? ' open' : '') + '" id="ygrid-' + escapeHtml(year) + '">' +
         monthsHtml +
       '</div>' +
     '</div>';
   }).join('');
 }
 
-function calcMonthActivityGlobal(prefix) {
-  /* jshint ignore:start */
-  var players = typeof st !== 'undefined' ? st.players : [];
-  /* jshint ignore:end */
-  return players
+/* Per-player activity in a month, from the engine's end-of-day entries: played = games > 0,
+ * not played = games === 0. Start-of-day entries (start: true) are not days of their own. */
+function calcMonthActivity(prefix) {
+  return st.players
     .map(function(p) {
-      var entries = (p.series || []).filter(function(e) { return e.date.startsWith(prefix); });
-      var playedDays = 0, zeroDays = 0;
-      for (var i = 1; i < entries.length; i++) {
-        var d = Math.abs(entries[i].rating - entries[i - 1].rating);
-        if (d > 0.001) playedDays++; else zeroDays++;
-      }
-      return { nick: p.nick, playedDays: playedDays, zeroDays: zeroDays };
+      var playedDates = [];
+      var zeroDays = 0;
+      (p.series || []).forEach(function(e) {
+        if (e.start || !e.date.startsWith(prefix)) return;
+        var games = Number(e.games);
+        if (games > 0) playedDates.push(e.date);
+        else if (games === 0) zeroDays++;
+      });
+      return { nick: p.nick, playedDays: playedDates.length, zeroDays: zeroDays, playedDates: playedDates };
     })
     .sort(function(a, b) { return b.playedDays - a.playedDays || a.nick.localeCompare(b.nick); });
 }
 
-function monthGridHtmlGlobal(players) {
-  function escH(str) { return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function monthGridHtml(players) {
   return players.map(function(p) {
     var active = p.playedDays > 0;
     var cls = active ? 'player-tile tile-active' : 'player-tile tile-inactive';
     var stats =
       '<div class="tile-stat tile-played">Played: ' + p.playedDays + '</div>' +
       '<div class="tile-stat tile-none">Not played: ' + p.zeroDays + '</div>';
-    return '<div class="' + cls + '"><div class="tile-nick">' + escH(p.nick) + '</div>' + stats + '</div>';
+    return '<div class="' + cls + '"><div class="tile-nick">' + escapeHtml(p.nick) + '</div>' + stats + '</div>';
   }).join('');
 }
 
@@ -1659,10 +1710,10 @@ document.addEventListener("DOMContentLoaded", function() {
   var achIconName  = document.getElementById("achIconName");
 
   if (addAchBtn) addAchBtn.addEventListener("click", function() {
-    addAchForm.style.display = addAchForm.style.display === "none" ? "flex" : "none";
+    addAchForm.classList.toggle("open");
   });
   if (achCancelBtn) achCancelBtn.addEventListener("click", function() {
-    addAchForm.style.display = "none";
+    addAchForm.classList.remove("open");
     document.getElementById("achNameInput").value = "";
     document.getElementById("achUrlInput").value = "";
     achIconInput.value = ""; achIconName.textContent = "No file";
@@ -1675,14 +1726,28 @@ document.addEventListener("DOMContentLoaded", function() {
     var url  = document.getElementById("achUrlInput").value.trim();
     var file = achIconInput.files[0];
     if (!name) { alert("Enter achievement name."); return; }
+    if (url && !safeUrl(url)) { alert("The link must be an http:// or https:// URL."); return; }
     if (!file) { alert("Choose an icon image."); return; }
     createAchievement(name, url, file);
   });
 });
 
-if (getCookie(ADMIN_CFG.COOKIE)) {
-  st.adminEmail = getCookie("esb_admin_email") || "";
-  enterPanel();
+/* The old cookie gate is gone; remove its leftover cookies. */
+["esb_admin", "esb_admin_email"].forEach(function(name) {
+  var present = document.cookie.split("; ").some(function(c) { return c.indexOf(name + "=") === 0; });
+  if (present) document.cookie = name + "=; expires=Thu, 01 Jan 1970 00:00:00 GMT; path=/";
+});
+
+st.session = readStoredSession();
+if (st.session) {
+  st.adminEmail = st.session.email || "";
+  /* A login submitted while this check was running has already opened the panel. */
+  getAccessToken().then(function() {
+    if (panelSection.style.display === "none") enterPanel();
+  }, function(err) {
+    console.error("Session check failed:", err);
+    if (st.session && panelSection.style.display === "none") showLoginError("Connection error. Try again.");
+  });
 } else {
   if (emailInput) emailInput.focus();
 }
@@ -1691,11 +1756,10 @@ if (getCookie(ADMIN_CFG.COOKIE)) {
 async function deletePlayer(nick, rowEl) {
   if (rowEl) rowEl.style.opacity = "0.4";
   try {
-    var res = await fetch(
-      SUPABASE.URL + "/rest/v1/player_config?nickname=eq." + encodeURIComponent(nick),
-      { method: "DELETE", headers: { apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY } }
-    );
-    if (!res.ok) throw new Error("HTTP " + res.status);
+    requireRows(await adminRequest("/rest/v1/player_config?nickname=eq." + encodeURIComponent(nick), {
+      method: "DELETE",
+      prefer: "return=representation",
+    }));
     writeLog("Player deleted", nick);
     st.players = st.players.filter(function(p) { return p.nick !== nick; });
     if (rowEl) rowEl.remove();
@@ -1718,25 +1782,26 @@ async function addNewPlayer() {
 
   if (!nick) { showAddMsg("Enter a nickname.", "error"); return; }
   if (!isFinite(rating) || rating < 0) { showAddMsg("Enter a valid starting rating.", "error"); return; }
+  if (st.players.some(function(p) { return p.nick === nick; })) { showAddMsg(nick + " already exists.", "error"); return; }
 
   btn.disabled = true; btn.textContent = "Adding…";
 
   try {
-    var res = await fetch(SUPABASE.URL + "/rest/v1/player_config", {
+    await adminRequest("/rest/v1/player_config", {
       method: "POST",
-      headers: {
-        apikey: SUPABASE.KEY, Authorization: "Bearer " + SUPABASE.KEY,
-        "Content-Type": "application/json", Prefer: "resolution=ignore-duplicates",
-      },
-      body: JSON.stringify({ nickname: nick, initial_rating: rating, active: true }),
+      body: { nickname: nick, initial_rating: rating, active: true },
+      prefer: "return=representation",
     });
-    if (!res.ok) { var e = await res.text(); throw new Error(e); }
 
     writeLog("Player added", nick + " (rating: " + rating + ")");
+    st.players.push({ nick: nick, rating: rating, series: [] });
+    sortPlayers();
+    renderList();
     showAddMsg("✓ " + nick + " added!", "success");
     if (nickInput) nickInput.value = "";
+    if (ratingInput) ratingInput.value = "";
   } catch (e) {
-    showAddMsg("Error: " + e.message, "error");
+    showAddMsg(e.status === 409 ? nick + " already exists." : "Error: " + e.message, "error");
   } finally {
     btn.disabled = false; btn.textContent = "+ Add Player";
   }

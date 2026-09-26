@@ -69,6 +69,8 @@
         <span class="stat-pill hidden-pill"><span>Hidden:</span><span class="count" id="totalHidden">0</span></span>
         <button id="exportCsvBtn" class="btn" type="button" style="font-size:13px;margin-left:auto;">📥 Export CSV</button>
       </div>
+      <!-- Load failures that do not empty the list (ratings, visibility, badges) -->
+      <div id="playerLoadError" class="load-error-box" style="display:none;"></div>
       <!-- Add new player -->
       <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:16px;padding:14px;background:rgba(255,255,255,0.04);border-radius:10px;">
         <div class="field" style="margin:0;">
@@ -190,6 +192,7 @@
       </div>
       <p class="dash-h3" style="margin-top:0;margin-bottom:16px;">
         Manually correct a player's rating at a specific date. Applied in chronological order by the engine.
+        Monthly resets are not listed here; they are managed in the Monthly Reset tab.
       </p>
       <!-- Add form -->
       <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:20px;padding:16px;background:rgba(255,255,255,0.04);border-radius:10px;">
@@ -228,7 +231,7 @@
     <!-- FORMULA TAB -->
     <div id="sectionFormula" style="display:none;padding-bottom:32px;">
       <div class="ach-section-header" style="margin-bottom:4px;"><h2 class="ach-section-title">Rating Formula</h2></div>
-      <p class="dash-h3" style="margin-top:0;margin-bottom:16px;">Set the base points applied to wins and draws. Values are stored in Supabase.</p>
+      <p class="dash-h3" style="margin-top:0;margin-bottom:16px;">Set the base points applied to wins and draws. Values are stored in Supabase. Each match awards min + 0, 1, 2 … points up to max, so max − min must be a whole number.</p>
       <div class="stats-bar" style="align-items:flex-end;">
         <label class="field"><span class="tg-label">Win min</span><input id="formulaWinMin" type="number" step="0.01" value="3"></label>
         <label class="field"><span class="tg-label">Win max</span><input id="formulaWinMax" type="number" step="0.01" value="3"></label>
@@ -242,6 +245,7 @@
   </main>
 </div>
 
+<script src="./js/common.js" defer></script>
 <script src="./js/sheets.js" defer></script>
 <script src="./js/engine.js" defer></script>
 <script src="./js/admin.js" defer></script>

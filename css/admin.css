@@ -3,7 +3,7 @@
  * ============================================================ */
 
 /* ===== Global mobile fix ===== */
-html, body { overflow-x: hidden; }
+html, body { overflow-x: clip; }
 
 /* ===== Login ===== */
 .login-screen { min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px; }
@@ -66,6 +66,9 @@ html, body { overflow-x: hidden; }
 .toggle input:checked + .toggle-track .toggle-thumb { transform:translateX(20px); background:var(--accent); }
 .toggle-label { font-size:13px; opacity:0.75; width:52px; }
 .loading-msg { opacity:0.6; padding:24px 0; text-align:center; font-size:14px; }
+.load-error { color:#ff7676; padding:16px 0; margin:0; text-align:center; font-size:14px; }
+.load-error-box { margin-bottom:16px; padding:0 14px; border-radius:10px; border:1px solid rgba(255,118,118,0.35); background:rgba(255,118,118,0.08); }
+.load-error-box .load-error { padding:10px 0; font-size:13px; text-align:left; }
 
 /* ===== Row actions ===== */
 .row-actions { display:flex; align-items:center; gap:8px; flex-shrink:0; }
@@ -104,13 +107,12 @@ html, body { overflow-x: hidden; }
 .month-toggle:hover { background:var(--hover-bg); }
 .month-arrow { font-size:10px; opacity:0.45; display:inline-block; transition:transform 220ms var(--ease); }
 .month-toggle.open .month-arrow { transform:rotate(180deg); }
+/* Closed accordions are display:none, so an open one is never clipped however many players it lists. */
 .month-grid {
-  display:grid; grid-template-columns:repeat(auto-fill, minmax(108px, 1fr));
-  gap:7px; padding:8px 0 4px; overflow:hidden;
-  max-height:0; opacity:0; pointer-events:none;
-  transition:max-height 350ms var(--ease), opacity 250ms var(--ease), padding 250ms;
+  display:none; grid-template-columns:repeat(auto-fill, minmax(108px, 1fr));
+  gap:7px; padding:8px 0 4px;
 }
-.month-grid.open { max-height:2000px; opacity:1; pointer-events:auto; padding:8px 0 4px; }
+.month-grid.open { display:grid; animation:fadeIn 250ms var(--ease) both; }
 .player-tile {
   background:var(--card-bg); border:1px solid var(--card-border);
   border-radius:var(--radius-md); padding:10px 8px 9px; text-align:center;
@@ -134,8 +136,8 @@ html, body { overflow-x: hidden; }
 }
 .year-toggle:hover { background:rgba(53,192,122,0.14); }
 .year-toggle.open .month-arrow { transform:rotate(180deg); }
-.year-body { overflow:hidden; max-height:0; opacity:0; pointer-events:none; transition:max-height 400ms var(--ease), opacity 300ms var(--ease); padding:0; }
-.year-body.open { max-height:9999px; opacity:1; pointer-events:auto; padding:8px 0 4px; }
+.year-body { display:none; padding:8px 0 4px; }
+.year-body.open { display:block; animation:fadeIn 300ms var(--ease) both; }
 
 /* ===== Log ===== */
 .log-wrap { background:var(--card-bg); border:1px solid var(--card-border); border-radius:var(--radius-md); overflow:hidden; }
@@ -173,6 +175,7 @@ html, body { overflow-x: hidden; }
 
 /* New achievement form */
 .ach-create-form { display:none; flex-direction:column; gap:12px; padding:16px; background:var(--card-bg); border:1px solid var(--card-border); border-radius:var(--radius-md); margin-bottom:16px; }
+.ach-create-form.open { display:flex; }
 .ach-form-row { display:flex; flex-direction:column; gap:6px; }
 .ach-form-label { font-size:12px; opacity:0.6; text-transform:uppercase; letter-spacing:0.04em; }
 .ach-form-input { padding:9px 12px; border-radius:var(--radius-sm); border:1px solid var(--soft-border); background:var(--soft-bg); color:inherit; font:inherit; outline:none; }

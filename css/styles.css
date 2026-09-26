@@ -36,7 +36,8 @@
 
 /* ========== Base ========== */
 *, *::before, *::after { box-sizing: border-box; }
-html, body { height: 100%; overflow-x: hidden; }
+/* clip (unlike hidden) creates no scroll container: the page scrolls on the window */
+html, body { overflow-x: clip; }
 body {
   margin: 0;
   position: relative;
@@ -98,7 +99,8 @@ h1, h2, h3 { letter-spacing: -0.01em; }
   gap: 16px;
   padding: 16px 0 28px;
 }
-@media (max-width: 1100px) {
+/* The 3 columns need 1112px (340 + 480 + 260 + 2 gaps) plus the scrollbar */
+@media (max-width: 1150px) {
   .grid { grid-template-columns: 1fr; }
   canvas { width: 100%; height: auto; }
 }
@@ -129,6 +131,7 @@ input[type="search"]:focus {
   padding: 14px;
   box-shadow: var(--shadow-card);
   transition: border-color var(--t) var(--ease);
+  scroll-margin-top: calc(var(--topbar-h, 96px) + 12px);
 }
 .card h2 { margin: 0 0 12px; font-size: 18px; }
 .card h3 { margin: 16px 0 10px; font-size: 15px; opacity: 0.95; }
@@ -175,6 +178,7 @@ tbody td:nth-child(2) { width: 99%; white-space: nowrap; }
 tbody tr { cursor: pointer; transition: background var(--t) var(--ease); }
 tbody tr:hover { background: var(--soft-bg); }
 tbody tr.active { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(--accent); }
+tbody tr:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .right { text-align: right; }
 .rank-1 { background: rgba(255, 215, 0, 0.10); }
 .rank-2 { background: rgba(180, 200, 230, 0.10); }
@@ -259,6 +263,7 @@ tbody tr.active { background: var(--accent-soft); box-shadow: inset 3px 0 0 var(
   font-size: 11px;
   opacity: 0.5;
   text-align: center;
+  white-space: nowrap; /* "✎ adjusted" stays on one line */
 }
 .hist-rank {
   flex: 1;
@@ -331,6 +336,7 @@ footer { padding: 14px 0 20px; text-align: center; opacity: 0.7; border-top: 1px
   border-bottom: 1px solid rgba(53,192,122,0.2); padding: 10px 0;
   animation: fadeIn 400ms var(--ease) both;
 }
+.week-banner:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .week-inner { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
 .week-label { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.08em; color: var(--accent); opacity: 0.9; white-space: nowrap; }
 .week-player { display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; }
@@ -369,7 +375,8 @@ footer { padding: 14px 0 20px; text-align: center; opacity: 0.7; border-top: 1px
 [data-theme="light"] .cmp-btn { border-color: rgba(0,0,0,0.15); color: rgba(0,0,0,0.35); }
 .cmp-btn:hover { background: rgba(53,192,122,0.15); border-color: rgba(53,192,122,0.5); color: var(--accent); }
 .cmp-btn.selected { background: rgba(53,192,122,0.2); border-color: var(--accent); color: var(--accent); }
-tr:not(:hover) .cmp-btn:not(.selected) { opacity: 0; }
+.cmp-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+tr:not(:hover):not(:focus-visible) .cmp-btn:not(.selected):not(:focus-visible) { opacity: 0; }
 
 /* ========== Comparison Modal ========== */
 .compare-modal { position: fixed; inset: 0; z-index: 600; display: flex; align-items: center; justify-content: center; padding: 20px; }
@@ -436,6 +443,18 @@ tr:not(:hover) .cmp-btn:not(.selected) { opacity: 0; }
 .back-to-top.visible { display: flex; }
 .back-to-top:hover { transform: translateY(-2px); }
 
+/* ========== Load notice ========== */
+.load-notice {
+  position: fixed; left: 16px; bottom: 20px; z-index: 100;
+  max-width: calc(100% - 90px); padding: 10px 14px;
+  border-radius: var(--radius-sm); background: var(--tip-bg);
+  border: 1px solid rgba(255,118,118,0.45); color: #ff9a9a;
+  font-size: 13px; cursor: pointer;
+  box-shadow: 0 8px 22px rgba(0,0,0,0.45);
+  animation: fadeIn 250ms var(--ease) both;
+}
+.load-notice[hidden] { display: none; }
+
 /* ========== Mobile ========== */
 @media (max-width: 768px) {
   .topbar { padding: 12px 0; }
@@ -469,7 +488,7 @@ tr:not(:hover) .cmp-btn:not(.selected) { opacity: 0; }
   .compare-stat-val { font-size: 15px; }
 
   .mini-card { display: none !important; }
-  tr:not(:hover) .cmp-btn:not(.selected) { opacity: 0.35; }
+  tr:not(:hover):not(:focus-visible) .cmp-btn:not(.selected):not(:focus-visible) { opacity: 0.35; }
 }
 
 /* ========== Animations ========== */
