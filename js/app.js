@@ -698,7 +698,7 @@ function openCompareModal(nick1, nick2) {
         </div>
         <div class="compare-stat">
           <div class="compare-stat-label">Group</div>
-          <div class="compare-stat-val" style="font-size:14px;color:${g.color}">${escapeHtml(g.name)}</div>
+          <div class="compare-stat-val" style="font-size:14px"><span class="groupDot" aria-hidden="true" style="display:inline-block;vertical-align:middle;background:${g.color}"></span> ${escapeHtml(g.name)}</div>
         </div>
         <div class="compare-stat">
           <div class="compare-stat-label">Games this month</div>
@@ -877,7 +877,7 @@ function drawChartFrame(series, dims, opts = {}) {
   // Gridlines + Y-axis labels
   ctx.strokeStyle = "rgba(255,255,255,0.06)";
   ctx.lineWidth = 1;
-  ctx.fillStyle = "rgba(255,255,255,0.42)";
+  ctx.fillStyle = "rgba(255,255,255,0.46)"; // 4.6:1 on the chart background
   ctx.font = "11px ui-sans-serif, system-ui, sans-serif";
   ctx.textAlign = "right";
   ctx.textBaseline = "middle";

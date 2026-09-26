@@ -25,7 +25,8 @@
   --topbar-bg: rgba(11, 15, 20, 0.55);
   --topbar-border: rgba(255, 255, 255, 0.08);
   --thead-bg: rgba(11, 15, 20, 0.4);
-  --placeholder-color: rgba(255, 255, 255, 0.45);
+  --placeholder-color: rgba(255, 255, 255, 0.49); /* 4.6:1 on every field fill, public and admin */
+  --input-border: rgba(255, 255, 255, 0.33); /* text-field outline: 3.1:1 on the page, a card or a form */
   --btn-border: rgba(255, 255, 255, 0.15);
   --btn-bg: rgba(255, 255, 255, 0.08);
   --input-focus-bg: rgba(255, 255, 255, 0.08);
@@ -116,14 +117,14 @@ h1, h2, h3 { letter-spacing: -0.01em; }
 input[type="search"] {
   padding: 10px 12px;
   border-radius: var(--radius-sm);
-  border: 1px solid var(--soft-border);
+  border: 1px solid var(--input-border);
   background: var(--soft-bg);
   color: inherit;
   outline: none;
   min-width: 240px;
   transition: border-color var(--t) var(--ease), background var(--t) var(--ease), box-shadow var(--t) var(--ease);
 }
-input[type="search"]::placeholder { color: var(--placeholder-color); }
+input[type="search"]::placeholder { color: var(--placeholder-color); opacity: 1; } /* Firefox dims placeholders by default */
 input[type="search"]:focus {
   border-color: var(--accent-border);
   background: var(--input-focus-bg);
@@ -239,7 +240,7 @@ tbody tr:has(.row-pick:focus-visible) { outline: 2px solid var(--accent); outlin
 }
 .dateRange input[type="date"] {
   padding: 6px 10px; border-radius: var(--radius-sm);
-  border: 1px solid var(--soft-border); background: var(--soft-bg);
+  border: 1px solid var(--input-border); background: var(--soft-bg);
   color: inherit; font: inherit; font-size: 13px; cursor: pointer; outline: none;
   transition: border-color var(--t) var(--ease), box-shadow var(--t) var(--ease);
   color-scheme: dark;
@@ -302,7 +303,7 @@ tbody tr:has(.row-pick:focus-visible) { outline: 2px solid var(--accent); outlin
   flex: 1;
   font-size: 12px;
   font-weight: 700;
-  color: rgba(255, 255, 255, 0.35);
+  color: rgba(255, 255, 255, 0.46); /* 4.6:1 on the card */
   text-align: left;
 }
 .hist-arrow {
@@ -412,20 +413,21 @@ footer { padding: 14px 0 20px; text-align: center; opacity: 0.7; border-top: 1px
   display: inline-flex; align-items: center; justify-content: center;
   height: 18px; padding: 0 7px; border-radius: 99px;
   background: transparent; border: 1px solid rgba(255,255,255,0.15);
-  color: rgba(255,255,255,0.4); font-size: 10px; font-weight: 600;
+  color: rgba(255,255,255,0.51); font-size: 10px; font-weight: 600; /* 4.6:1 on every row, the active one included */
   letter-spacing: 0.04em; text-transform: uppercase;
   cursor: pointer; transition: all var(--t) var(--ease);
   vertical-align: middle; margin-left: 6px; flex-shrink: 0; white-space: nowrap;
 }
 [data-theme="light"] .cmp-btn { border-color: rgba(0,0,0,0.15); color: rgba(0,0,0,0.35); }
-.cmp-btn:hover { background: rgba(53,192,122,0.15); border-color: rgba(53,192,122,0.5); color: var(--accent); }
-.cmp-btn.selected { background: rgba(53,192,122,0.2); border-color: var(--accent); color: var(--accent); }
+.cmp-btn:hover { background: rgba(53,192,122,0.12); border-color: rgba(53,192,122,0.5); color: var(--accent); }
+.cmp-btn.selected { background: rgba(53,192,122,0.12); border-color: var(--accent); color: var(--accent); } /* a lighter fill keeps the accent text at 4.6:1 on the active row */
 .cmp-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 /* Keyboard focus on the row's nickname reveals it too; a mouse click (no :focus-visible) does not */
 tr:not(:hover):not(:has(:focus-visible)) .cmp-btn:not(.selected):not(:focus-visible) { opacity: 0; }
-/* Touch screens have no hover to reveal the "vs" button, whatever their width. */
+/* Touch screens have no hover to reveal the "vs" button, whatever their width. Shown in full:
+ * any dimming takes its small text under 4.5:1. */
 @media (hover: none) {
-  tr:not(:hover):not(:has(:focus-visible)) .cmp-btn:not(.selected):not(:focus-visible) { opacity: 0.7; }
+  tr:not(:hover):not(:has(:focus-visible)) .cmp-btn:not(.selected):not(:focus-visible) { opacity: 1; }
 }
 
 /* ========== Comparison Modal ========== */
@@ -479,7 +481,7 @@ tr:not(:hover):not(:has(:focus-visible)) .cmp-btn:not(.selected):not(:focus-visi
   animation: spin 800ms linear infinite;
 }
 .loading-text { font-size: 18px; font-weight: 700; letter-spacing: 0.02em; color: var(--fg); }
-.loading-sub { font-size: 13px; opacity: 0.45; animation: pulse 1.5s ease-in-out infinite; }
+.loading-sub { font-size: 13px; opacity: 0.5; animation: pulse 1.5s ease-in-out infinite; } /* 4.7:1 at its dimmest */
 
 /* ========== Back to top ========== */
 .back-to-top {
@@ -654,7 +656,7 @@ body::after {
   .compare-stat-val { font-size: 15px; }
 
   .mini-card { display: none !important; }
-  tr:not(:hover):not(:has(:focus-visible)) .cmp-btn:not(.selected):not(:focus-visible) { opacity: 0.7; }
+  tr:not(:hover):not(:has(:focus-visible)) .cmp-btn:not(.selected):not(:focus-visible) { opacity: 1; }
 }
 
 /* Small phones (< 480px) */
@@ -693,7 +695,7 @@ body::after {
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 @keyframes pulse {
-  0%, 100% { opacity: 0.45; }
+  0%, 100% { opacity: 0.5; }
   50%       { opacity: 0.9; }
 }
 @keyframes loading-glow {

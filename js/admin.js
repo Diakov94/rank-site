@@ -1280,8 +1280,8 @@ function makeAchCard(ach) {
         '<div class="ach-card-name">' + escapeHtml(ach.name) + '</div>' +
         '<div class="ach-card-url">' +
           (href ? '<a href="' + escapeHtml(href) + '" target="_blank" rel="noopener">' + escapeHtml(ach.url) + '</a>'
-            : ach.url ? '<span style="opacity:0.4;">' + escapeHtml(ach.url) + ' (not an http(s) link)</span>'
-            : '<span style="opacity:0.4;">No link</span>') +
+            : ach.url ? '<span style="opacity:0.68;">' + escapeHtml(ach.url) + ' (not an http(s) link)</span>'
+            : '<span style="opacity:0.68;">No link</span>') +
         '</div>' +
       '</div>' +
       '<div class="ach-card-actions">' +
@@ -1818,7 +1818,7 @@ async function loadLog() {
       var timeStr = formatStamp(r.created_at, "—");
       html += '<tr>' +
         '<td class="log-time">' + escapeHtml(timeStr) + '</td>' +
-        '<td class="log-details" style="color:var(--accent);font-size:12px;">' + escapeHtml(r.email || "—") + '</td>' +
+        '<td class="log-details" style="color:var(--accent);font-size:12px;opacity:0.74;">' + escapeHtml(r.email || "—") + '</td>' +
         '<td class="log-action">' + escapeHtml(r.action) + '</td>' +
         '<td class="log-details">' + escapeHtml(r.details || "—") + '</td>' +
         '</tr>';
