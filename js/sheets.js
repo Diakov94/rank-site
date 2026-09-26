@@ -10,54 +10,88 @@ const SHEETS_INDEX_ID = "1L-yxNa_4JgH3bebdzPjq91DJgA5tT-WYzTvMsvoC_ow";
 const MONTH_ABBR = ["Jan","Feb","Mar","Apr","May","Jun",
                     "Jul","Aug","Sep","Oct","Nov","Dec"];
 
-/* ---- CSV parser ---- */
-function parseCsvLine(line) {
-  const cells = [];
-  let inQ = false, cell = "";
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (c === '"') { inQ = !inQ; }
-    else if (c === "," && !inQ) { cells.push(cell); cell = ""; }
+/* ---- CSV parser (RFC 4180) ----
+ * Whole text -> records (arrays of cells). Handles "" inside quoted cells, commas and
+ * line breaks inside quotes, and LF or CRLF record ends. One record = one worksheet row. */
+function parseCsv(text) {
+  const records = [];
+  let record = [], cell = "", inQ = false, open = false; // open: current record has content
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    open = true;
+    if (inQ) {
+      if (c !== '"') cell += c;
+      else if (text[i + 1] === '"') { cell += '"'; i++; }
+      else inQ = false;
+    }
+    else if (c === '"') { inQ = true; }
+    else if (c === ",") { record.push(cell); cell = ""; }
+    else if (c === "\n" || (c === "\r" && text[i + 1] === "\n")) {
+      if (c === "\r") i++;
+      record.push(cell); records.push(record);
+      record = []; cell = ""; open = false;
+    }
     else { cell += c; }
   }
-  cells.push(cell);
-  return cells;
+  if (open) { record.push(cell); records.push(record); }
+  return records;
 }
 
-/* ---- Parse index sheet: col B = year, col C = URL ---- */
+/* ---- Parse index sheet: col B = year, col C = URL ----
+ * One entry per (year, sheet id): a doc listed twice for a year would load its tabs twice
+ * and count every match twice. A doc listed under two years is kept for both, because each
+ * year reads its own tabs (Jan26… vs Jan27…). */
 function parseIndexSheet(csv) {
   const result = [];
-  for (const line of csv.split("\n")) {
-    const cells = parseCsvLine(line);
+  const seen = new Set();
+  for (const cells of parseCsv(csv)) {
     const year  = parseInt(cells[1]);
     const url   = (cells[2] || "").trim();
     if (!year || !url) continue;
     const sheetId = url.match(/\/spreadsheets\/d\/([a-zA-Z0-9-_]+)/)?.[1];
-    if (sheetId) result.push({ year, sheetId });
+    const key = `${year}|${sheetId}`;
+    if (!sheetId || seen.has(key)) continue;
+    seen.add(key);
+    result.push({ year, sheetId });
   }
   return result;
+}
+
+/* ---- Match time (column C): "H:MM" or "H:MM:SS" -> "HH:MM:SS", else null ----
+ * Kyiv wall-clock time. Rows after midnight keep the previous work day's date, so a
+ * time before 07:30 belongs to the end of that work day (see workDayOffset in common.js). */
+function parseMatchTime(raw) {
+  const m = /^(\d{1,2}):([0-5]\d)(?::([0-5]\d))?$/.exec(String(raw ?? "").trim());
+  if (!m || Number(m[1]) > 23) return null;
+  return `${m[1].padStart(2, "0")}:${m[2]}:${m[3] ?? "00"}`;
 }
 
 /* ---- Parse one month tab CSV into match objects ---- */
 // Tab format: row 1 = header, rows 2+ = data
 // Columns A-J: Date, Tournament, Time, Team1, Team2, Player1, Player2, Score1, (empty), Score2
-function parseMonthCsv(text) {
+// Date is the work day (07:30 -> 07:30 Kyiv), not the calendar day; rows run in time order.
+function parseMonthCsv(text, tabName = "month tab") {
   const matches = [];
-  const lines   = text.split("\n");
+  const rows    = parseCsv(text);
+  let badDates  = 0;
 
   // Row 0 is header — skip it
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i];
-    if (!line.trim()) continue;
-
-    const cells = parseCsvLine(line);
+  for (let i = 1; i < rows.length; i++) {
+    const cells = rows[i];
     if (cells.length < 10) continue;
 
-    // A (0): date DD.MM.YYYY
+    // A (0): date DD.MM.YYYY, and it must exist in the calendar
     const dateRaw = cells[0].trim();
     if (!/^\d{1,2}\.\d{1,2}\.\d{4}$/.test(dateRaw)) continue;
     const [dd, mm, yyyy] = dateRaw.split(".");
+    const day = Number(dd), month = Number(mm), year = Number(yyyy);
+    const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+    const monthDays = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
+    if (!monthDays || day < 1 || day > monthDays) { badDates++; continue; }
     const date = `${yyyy}-${mm.padStart(2,"0")}-${dd.padStart(2,"0")}`;
+
+    // C (2): time "HH:MM:SS" or null. It is not part of the signature (the points hash).
+    const time = parseMatchTime(cells[2]);
 
     // F (5): Player1, G (6): Player2
     const player1 = cells[5].trim();
@@ -75,22 +109,30 @@ function parseMonthCsv(text) {
     // to apply same-day matches and as part of the deterministic points hash.
     const rowIndex = i + 1; // 1-based worksheet row (header is row 1)
     const signature = `${date}|#${rowIndex}|${player1}|${player2}|${score1}|${score2}`;
-    matches.push({ date, player1, player2, score1, score2, rowIndex, signature });
+    matches.push({ date, time, player1, player2, score1, score2, rowIndex, signature });
   }
+  if (badDates) console.warn(`Sheets: ${tabName}: skipped ${badDates} row(s) with an invalid date`);
   return matches;
+}
+
+/* ---- Fetch one gviz CSV; network errors and non-OK responses throw ----
+ * A tab that does not exist comes back as 200 with an empty body (no matches). */
+async function fetchSheetText(url, what) {
+  let res;
+  try {
+    res = await fetch(url);
+  } catch (e) {
+    throw new Error(`Sheets: failed to load ${what}: ${e?.message ?? e}`, { cause: e });
+  }
+  if (!res.ok) throw new Error(`Sheets: failed to load ${what}: HTTP ${res.status}`);
+  return res.text();
 }
 
 /* ---- Main: fetch all matches from all years/months ---- */
 async function fetchMatchesFromSheets() {
   // 1. Read index
   const indexUrl = `https://docs.google.com/spreadsheets/d/${SHEETS_INDEX_ID}/gviz/tq?tqx=out:csv`;
-  let indexCsv;
-  try {
-    indexCsv = await fetch(indexUrl).then(r => r.text());
-  } catch (e) {
-    console.error("Sheets: failed to load index", e);
-    return [];
-  }
+  const indexCsv = await fetchSheetText(indexUrl, "index");
 
   const yearEntries = parseIndexSheet(indexCsv);
   if (!yearEntries.length) {
@@ -98,22 +140,17 @@ async function fetchMatchesFromSheets() {
     return [];
   }
 
-  // 2. Follow the central document's links and read only the linked month tabs.
-  const allMatches = [];
-
-  for (const { year, sheetId } of yearEntries) {
+  // 2. Follow the central document's links and read the month tabs of every year in parallel.
+  const tabs = yearEntries.flatMap(({ year, sheetId }) => {
     const yy = String(year).slice(2); // "2026" → "26"
+    return MONTH_ABBR.map((abbr) => ({ sheetId, tabName: abbr + yy }));
+  });
+  const monthResults = await Promise.all(tabs.map(({ sheetId, tabName }) => {
+    const url = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(tabName)}`;
+    return fetchSheetText(url, `tab ${tabName}`).then((csv) => parseMonthCsv(csv, tabName));
+  }));
 
-    // Try all month tabs in parallel
-    const monthResults = await Promise.all(MONTH_ABBR.map(abbr => {
-      const url = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=out:csv&sheet=${encodeURIComponent(abbr + yy)}`;
-      return fetch(url).then(r => r.text()).then(csv => parseMonthCsv(csv)).catch(() => []);
-    }));
-
-    const monthMatches = monthResults.flat();
-
-    allMatches.push(...monthMatches);
-  }
+  const allMatches = monthResults.flat();
 
   // 3. Order dates chronologically, preserving sheet row order within a day.
   // The supplied Apps Script processes matches by their source row, not time.

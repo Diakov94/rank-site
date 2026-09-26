@@ -9,13 +9,14 @@
   <link rel="stylesheet" href="./css/admin.css" />
 </head>
 <body>
+<div class="alpha-strip" role="note"><strong>ALPHA PRODUCT</strong> <span>Not a final product — ratings, data and features may change.</span></div>
 
 <!-- LOADING OVERLAY -->
 <div id="adminLoadingOverlay" class="loading-overlay hidden">
   <div class="loading-box">
     <div class="loading-spinner"></div>
     <div class="loading-text">ESB Admin</div>
-    <div class="loading-sub">Loading data…</div>
+    <div class="loading-sub" role="status">Loading data…</div>
   </div>
 </div>
 
@@ -23,14 +24,14 @@
 <div id="loginSection" class="login-screen">
   <div class="login-card">
     <h2>ESB Admin</h2>
-    <p id="loginError" class="error-msg" style="display:none;">Invalid email or password</p>
+    <p id="loginError" class="error-msg" role="alert"></p>
     <div class="field">
       <label for="emailInput">Email</label>
-      <input id="emailInput" type="email" placeholder="Enter email..." autocomplete="username" />
+      <input id="emailInput" type="email" placeholder="Enter email..." autocomplete="username" aria-describedby="loginError" />
     </div>
     <div class="field">
       <label for="passwordInput">Password</label>
-      <input id="passwordInput" type="password" placeholder="Enter password..." autocomplete="current-password" />
+      <input id="passwordInput" type="password" placeholder="Enter password..." autocomplete="current-password" aria-describedby="loginError" />
     </div>
     <button id="loginBtn" class="btn-primary" type="button">Log in</button>
   </div>
@@ -40,27 +41,32 @@
 <div id="panelSection" style="display:none;">
   <header class="admin-header">
     <div class="container admin-header-row">
-      <h1 class="admin-title">ESB Admin</h1>
-      <div style="display:flex;gap:8px;align-items:center;">
+      <h1 class="admin-title" tabindex="-1">ESB Admin</h1>
+      <div class="admin-header-actions">
+        <span id="adminIdentity" class="admin-identity" hidden></span>
         <a href="./index.html" class="btn" style="text-decoration:none;font-size:13px;">← Back to site</a>
         <button id="logoutBtn" class="btn" type="button" style="font-size:13px;">Log out</button>
       </div>
     </div>
     <div class="container">
       <div class="admin-tabs">
-        <button id="tabPlayers" class="admin-tab tab-active" type="button">👥 Players</button>
-        <button id="tabAchievements" class="admin-tab" type="button">🏆 Achievements</button>
-        <button id="tabDashboard" class="admin-tab" type="button">📊 Dashboard</button>
-        <button id="tabLog" class="admin-tab" type="button">📋 Log</button>
-        <button id="tabGroups" class="admin-tab" type="button">🎯 Groups</button>
-        <button id="tabReset" class="admin-tab" type="button">📅 Monthly Reset</button>
-        <button id="tabAdjustments" class="admin-tab" type="button">⚙️ Adjustments</button>
-        <button id="tabFormula" class="admin-tab" type="button">🧮 Formula</button>
+        <button id="tabPlayers" class="admin-tab tab-active" type="button" aria-controls="sectionPlayers" aria-current="true">👥 Players</button>
+        <button id="tabAchievements" class="admin-tab" type="button" aria-controls="sectionAchievements">🏆 Achievements</button>
+        <button id="tabDashboard" class="admin-tab" type="button" aria-controls="sectionDashboard">📊 Dashboard</button>
+        <button id="tabLog" class="admin-tab" type="button" aria-controls="sectionLog">📋 Log</button>
+        <button id="tabGroups" class="admin-tab" type="button" aria-controls="sectionGroups">🎯 Groups</button>
+        <button id="tabReset" class="admin-tab" type="button" aria-controls="sectionReset">📅 Monthly Reset</button>
+        <button id="tabAdjustments" class="admin-tab" type="button" aria-controls="sectionAdjustments">⚙️ Adjustments</button>
+        <button id="tabFormula" class="admin-tab" type="button" aria-controls="sectionFormula">🧮 Formula</button>
+        <button id="tabUsers" class="admin-tab" type="button" aria-controls="sectionUsers" hidden>👤 Users</button>
+        <button id="tabRoles" class="admin-tab" type="button" aria-controls="sectionRoles" hidden>🔐 Roles</button>
       </div>
     </div>
   </header>
 
   <main class="container" style="padding-top:16px;">
+    <!-- Loading states and load failures, read out by screen readers (announce() in admin.js) -->
+    <div id="adminStatus" class="sr-only" role="status"></div>
 
     <!-- PLAYERS TAB -->
     <div id="sectionPlayers">
@@ -69,18 +75,20 @@
         <span class="stat-pill hidden-pill"><span>Hidden:</span><span class="count" id="totalHidden">0</span></span>
         <button id="exportCsvBtn" class="btn" type="button" style="font-size:13px;margin-left:auto;">📥 Export CSV</button>
       </div>
+      <!-- Load failures that do not empty the list (ratings, visibility, badges) -->
+      <div id="playerLoadError" class="load-error-box" style="display:none;"></div>
       <!-- Add new player -->
-      <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:16px;padding:14px;background:rgba(255,255,255,0.04);border-radius:10px;">
-        <div class="field" style="margin:0;">
-          <label class="tg-label">Nickname</label>
-          <input id="newPlayerNick" type="text" placeholder="e.g. PlayerName" style="background:#1a2030;border:1px solid rgba(255,255,255,0.12);color:#fff;padding:6px 10px;border-radius:6px;font-size:13px;width:150px;" />
+      <div id="addPlayerForm" class="admin-form">
+        <div class="field">
+          <label class="tg-label" for="newPlayerNick">Nickname</label>
+          <input id="newPlayerNick" class="admin-input admin-input--nick" type="text" placeholder="e.g. PlayerName" />
         </div>
-        <div class="field" style="margin:0;">
-          <label class="tg-label">Starting rating</label>
-          <input id="newPlayerRating" type="number" step="0.5" min="0" placeholder="Enter rating" style="background:#1a2030;border:1px solid rgba(255,255,255,0.12);color:#fff;padding:6px 10px;border-radius:6px;font-size:13px;width:100px;" />
+        <div class="field">
+          <label class="tg-label" for="newPlayerRating">Starting rating</label>
+          <input id="newPlayerRating" class="admin-input admin-input--rating" type="number" step="0.5" min="0" placeholder="Enter rating" />
         </div>
         <button id="addPlayerBtn" class="btn" type="button" style="background:var(--accent);color:#0b0f14;font-weight:700;font-size:13px;">+ Add Player</button>
-        <span id="addPlayerMsg" style="font-size:13px;display:none;"></span>
+        <span id="addPlayerMsg" role="status" style="font-size:13px;"></span>
       </div>
       <div class="admin-search">
         <input id="adminSearch" type="search" placeholder="Search by nickname..." autocomplete="off" />
@@ -93,24 +101,25 @@
     <!-- ACHIEVEMENTS TAB -->
     <div id="sectionAchievements" style="display:none;" class="ach-section">
       <div class="ach-section-header">
-        <h2 class="ach-section-title">Achievements</h2>
-        <button id="addAchBtn" class="btn" type="button" style="font-size:13px;">+ New achievement</button>
+        <h2 class="ach-section-title" tabindex="-1">Achievements</h2>
+        <button id="addAchBtn" class="btn" type="button" aria-controls="addAchForm" aria-expanded="false" style="font-size:13px;">+ New achievement</button>
       </div>
 
       <!-- Create form -->
       <div id="addAchForm" class="ach-create-form">
         <div class="ach-form-row">
-          <label class="ach-form-label">Name</label>
+          <label class="ach-form-label" for="achNameInput">Name</label>
           <input id="achNameInput" class="ach-form-input" type="text" placeholder="e.g. Winner 2026 ESportsBattle CUP" />
         </div>
         <div class="ach-form-row">
-          <label class="ach-form-label">Link (URL) — optional</label>
+          <label class="ach-form-label" for="achUrlInput">Link (URL) — optional</label>
           <input id="achUrlInput" class="ach-form-input" type="url" placeholder="https://..." />
         </div>
         <div class="ach-form-row">
-          <label class="ach-form-label">Icon image</label>
+          <!-- Not a <label for>: clicking it would open the file dialog -->
+          <span class="ach-form-label" id="achIconLabel">Icon image</span>
           <div style="display:flex;align-items:center;gap:10px;">
-            <label class="upload-btn" title="Choose icon">🖼<input id="achIconInput" type="file" accept="image/*" style="display:none" /></label>
+            <label class="upload-btn" title="Choose icon"><span aria-hidden="true">🖼</span><input id="achIconInput" class="sr-only" type="file" accept="image/*" aria-labelledby="achIconLabel" /></label>
             <span id="achIconName" style="font-size:13px;opacity:0.55;">No file chosen</span>
           </div>
         </div>
@@ -151,14 +160,14 @@
       </p>
 
       <!-- Year / Month selectors -->
-      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:20px;">
-        <div class="field" style="margin:0;">
-          <label class="tg-label">Year</label>
-          <select id="resetYear" style="background:#1a2030;border:1px solid rgba(255,255,255,0.12);color:#fff;padding:6px 10px;border-radius:6px;font-size:13px;min-width:90px;"></select>
+      <div class="reset-controls">
+        <div class="field">
+          <label class="tg-label" for="resetYear">Year</label>
+          <select id="resetYear" class="admin-input admin-input--year"></select>
         </div>
-        <div class="field" style="margin:0;">
-          <label class="tg-label">Month</label>
-          <select id="resetMonth" style="background:#1a2030;border:1px solid rgba(255,255,255,0.12);color:#fff;padding:6px 10px;border-radius:6px;font-size:13px;min-width:130px;">
+        <div class="field">
+          <label class="tg-label" for="resetMonth">Month</label>
+          <select id="resetMonth" class="admin-input admin-input--month">
             <option value="01">January</option>
             <option value="02">February</option>
             <option value="03">March</option>
@@ -173,12 +182,12 @@
             <option value="12">December</option>
           </select>
         </div>
-        <button id="applyResetBtn" class="btn" type="button" style="background:var(--accent);color:#0b0f14;font-weight:700;font-size:13px;margin-top:18px;">💾 Save Reset</button>
-        <span id="resetMsg" style="font-size:13px;color:var(--accent);display:none;margin-top:18px;">✓ Saved!</span>
+        <button id="applyResetBtn" class="btn reset-controls-offset" type="button" style="background:var(--accent);color:#0b0f14;font-weight:700;font-size:13px;">💾 Save Reset</button>
+        <span id="resetMsg" class="reset-controls-offset" role="status" style="font-size:13px;color:var(--accent);"></span>
       </div>
 
       <!-- Applied date display -->
-      <p id="resetDateLabel" style="font-size:12px;opacity:0.45;margin:0 0 14px;"></p>
+      <p id="resetDateLabel" style="font-size:12px;opacity:0.5;margin:0 0 14px;"></p>
 
       <div id="resetList" class="player-list"><p class="loading-msg">Select a year and month above.</p></div>
     </div>
@@ -189,25 +198,28 @@
         <h2 class="ach-section-title">Rating Adjustments</h2>
       </div>
       <p class="dash-h3" style="margin-top:0;margin-bottom:16px;">
-        Manually correct a player's rating at a specific date. Applied in chronological order by the engine.
+        Sets a player's rating to the value entered. Dated the current work day (07:30–07:30 Kyiv time), it takes
+        effect when saved: that day's earlier results still count with the old rating, later ones build on the new value.
+        Dated another day, it takes effect at 07:30, the start of that work day. Earlier history is kept; this is
+        not a reset. Monthly resets are not listed here; they are managed in the Monthly Reset tab.
       </p>
       <!-- Add form -->
-      <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:20px;padding:16px;background:rgba(255,255,255,0.04);border-radius:10px;">
-        <div class="field" style="margin:0;">
-          <label class="tg-label">Player</label>
-          <select id="adjNick" style="background:#1a2030;border:1px solid rgba(255,255,255,0.12);color:#fff;padding:6px 10px;border-radius:6px;font-size:13px;min-width:140px;"></select>
+      <div class="admin-form admin-form--roomy">
+        <div class="field">
+          <label class="tg-label" for="adjNick">Player</label>
+          <select id="adjNick" class="admin-input admin-input--player"></select>
         </div>
-        <div class="field" style="margin:0;">
-          <label class="tg-label">New Rating</label>
-          <input id="adjRating" type="number" step="0.5" min="0" placeholder="e.g. 1000" style="background:#1a2030;border:1px solid rgba(255,255,255,0.12);color:#fff;padding:6px 10px;border-radius:6px;font-size:13px;width:110px;" />
+        <div class="field">
+          <label class="tg-label" for="adjRating">New Rating</label>
+          <input id="adjRating" class="admin-input admin-input--adj-rating" type="number" step="0.5" min="0" placeholder="e.g. 1000" />
         </div>
-        <div class="field" style="margin:0;">
-          <label class="tg-label">Date</label>
-          <input id="adjDate" type="date" style="background:#1a2030;border:1px solid rgba(255,255,255,0.12);color:#fff;padding:6px 10px;border-radius:6px;font-size:13px;" />
+        <div class="field">
+          <label class="tg-label" for="adjDate">Date</label>
+          <input id="adjDate" class="admin-input" type="date" />
         </div>
-        <div class="field" style="margin:0;flex:1;min-width:140px;">
-          <label class="tg-label">Reason (optional)</label>
-          <input id="adjReason" type="text" placeholder="e.g. penalty" style="background:#1a2030;border:1px solid rgba(255,255,255,0.12);color:#fff;padding:6px 10px;border-radius:6px;font-size:13px;width:100%;" />
+        <div class="field admin-form-grow">
+          <label class="tg-label" for="adjReason">Reason (optional)</label>
+          <input id="adjReason" class="admin-input admin-input--full" type="text" placeholder="e.g. penalty" />
         </div>
         <button id="addAdjBtn" class="btn" type="button" style="background:var(--accent);color:#0b0f14;font-weight:700;font-size:13px;white-space:nowrap;">+ Add</button>
       </div>
@@ -228,20 +240,75 @@
     <!-- FORMULA TAB -->
     <div id="sectionFormula" style="display:none;padding-bottom:32px;">
       <div class="ach-section-header" style="margin-bottom:4px;"><h2 class="ach-section-title">Rating Formula</h2></div>
-      <p class="dash-h3" style="margin-top:0;margin-bottom:16px;">Set the base points applied to wins and draws. Values are stored in Supabase.</p>
-      <div class="stats-bar" style="align-items:flex-end;">
+      <p class="dash-h3" style="margin-top:0;margin-bottom:16px;">Set the base points applied to wins and draws. Values are stored in Supabase. Each match awards min + 0, 1, 2 … points up to max, so max − min must be a whole number.</p>
+      <div class="stats-bar formula-bar">
         <label class="field"><span class="tg-label">Win min</span><input id="formulaWinMin" type="number" step="0.01" value="3"></label>
         <label class="field"><span class="tg-label">Win max</span><input id="formulaWinMax" type="number" step="0.01" value="3"></label>
         <label class="field"><span class="tg-label">Draw min</span><input id="formulaDrawMin" type="number" step="0.01" value="1"></label>
         <label class="field"><span class="tg-label">Draw max</span><input id="formulaDrawMax" type="number" step="0.01" value="1"></label>
         <button id="saveFormulaBtn" class="btn" type="button" style="background:var(--accent);color:#0b0f14;font-weight:700;">Save formula</button>
-        <span id="formulaMsg" style="font-size:13px;display:none;"></span>
+        <span id="formulaMsg" role="status" style="font-size:13px;"></span>
       </div>
+    </div>
+
+    <!-- USERS TAB -->
+    <div id="sectionUsers" style="display:none;padding-bottom:32px;">
+      <div class="ach-section-header" style="margin-bottom:4px;">
+        <h2 class="ach-section-title" tabindex="-1">Users</h2>
+      </div>
+      <p class="dash-h3" style="margin-top:0;margin-bottom:16px;">
+        Accounts that can log in to the admin panel. Each user has one role. You can give only roles whose
+        permissions you hold yourself, and you cannot change your own account here.
+      </p>
+      <!-- Create user -->
+      <div id="createUserForm" class="admin-form admin-form--roomy">
+        <div class="admin-field">
+          <label class="tg-label" for="newUserEmail">Email</label>
+          <input id="newUserEmail" class="admin-input admin-input--email" type="email" autocomplete="off" placeholder="name@example.com" />
+        </div>
+        <div class="admin-field">
+          <label class="tg-label" for="newUserPassword">Password</label>
+          <input id="newUserPassword" class="admin-input admin-input--password" type="password" autocomplete="new-password" placeholder="At least 8 characters" />
+        </div>
+        <div class="admin-field">
+          <label class="tg-label" for="newUserRole">Role</label>
+          <select id="newUserRole" class="admin-input admin-input--role"></select>
+        </div>
+        <button id="createUserBtn" class="btn btn-accent" type="button">+ Create user</button>
+        <span id="createUserMsg" class="form-msg" role="status"></span>
+      </div>
+      <div id="userList" class="user-list"><p class="loading-msg">Loading…</p></div>
+    </div>
+
+    <!-- ROLES TAB -->
+    <div id="sectionRoles" style="display:none;padding-bottom:32px;">
+      <div class="ach-section-header" style="margin-bottom:4px;">
+        <h2 class="ach-section-title" tabindex="-1">Roles</h2>
+      </div>
+      <p class="dash-h3" style="margin-top:0;margin-bottom:16px;">
+        A role is a set of permissions. Only the super admin sees this tab and creates, edits and deletes roles.
+        The super admin role has every permission and cannot be changed.
+      </p>
+      <!-- Create role -->
+      <div id="createRoleForm" class="admin-form admin-form--roomy">
+        <div class="admin-field">
+          <label class="tg-label" for="newRoleName">Name</label>
+          <input id="newRoleName" class="admin-input admin-input--role-name" type="text" autocomplete="off" placeholder="e.g. Moderator" />
+        </div>
+        <div class="admin-field admin-form-grow">
+          <label class="tg-label" for="newRoleDesc">Description (optional)</label>
+          <input id="newRoleDesc" class="admin-input admin-input--full" type="text" autocomplete="off" placeholder="What this role is for" />
+        </div>
+        <button id="createRoleBtn" class="btn btn-accent" type="button">+ Create role</button>
+        <span id="createRoleMsg" class="form-msg" role="status"></span>
+      </div>
+      <div id="roleList" class="role-list"><p class="loading-msg">Loading…</p></div>
     </div>
 
   </main>
 </div>
 
+<script src="./js/common.js" defer></script>
 <script src="./js/sheets.js" defer></script>
 <script src="./js/engine.js" defer></script>
 <script src="./js/admin.js" defer></script>

@@ -7,10 +7,13 @@
   <meta name="theme-color" content="#0b0f14" />
   <title>ESportsBattle Rank</title>
   <link rel="icon" href="./icons/favicon.svg" type="image/svg+xml" />
-  <link rel="preconnect" href="https://script.google.com" crossorigin />
+  <link rel="preconnect" href="https://vgmwxtpsbwzeqwtpxamo.supabase.co" crossorigin />
+  <link rel="preconnect" href="https://docs.google.com" crossorigin />
   <link rel="stylesheet" href="./css/styles.css" />
 </head>
 <body>
+<div class="alpha-strip" role="note"><strong>ALPHA PRODUCT</strong> <span>Not a final product — ratings, data and features may change.</span></div>
+
 <!-- Loading overlay -->
 <div id="loadingOverlay" class="loading-overlay">
   <div class="loading-box">
@@ -23,19 +26,19 @@
 <header class="topbar">
   <div class="container topbar-row">
     <div class="brand">
-      <h1>ESportsBattle Rank</h1>
+      <h1 tabindex="-1">ESportsBattle Rank</h1>
       <p class="subtitle">Public leaderboard and player rating history</p>
     </div>
     <div class="actions">
-      <input id="search" type="search" placeholder="Search by nickname..." aria-label="Search players" autocomplete="off" />
-      <button id="refresh" class="btn" type="button" aria-label="Refresh data">Refresh</button>
+      <input id="search" type="search" placeholder="Search by nickname..." aria-label="Search by nickname" autocomplete="off" />
+      <button id="refresh" class="btn" type="button">Refresh</button>
 <a id="adminLink" href="./admin.html" class="btn" style="display:none;text-decoration:none;" title="Admin panel">Admin</a>
     </div>
   </div>
 </header>
 
 <!-- Player of the Week banner -->
-<div id="weekBanner" class="week-banner" style="display:none;">
+<div id="weekBanner" class="week-banner" style="display:none;" role="button" tabindex="0">
   <div class="container week-inner">
     <div class="week-label">Player of the Week</div>
     <div class="week-player">
@@ -63,18 +66,18 @@
 </div>
 
 <!-- Comparison modal -->
-<div id="compareModal" class="compare-modal" style="display:none;">
+<div id="compareModal" class="compare-modal" style="display:none;" role="dialog" aria-modal="true" aria-labelledby="compareTitle">
   <div class="compare-backdrop"></div>
   <div class="compare-box">
-    <button id="compareClose" class="compare-close" type="button">✕</button>
-    <h2 class="compare-title">Player Comparison</h2>
+    <button id="compareClose" class="compare-close" type="button" aria-label="Close">✕</button>
+    <h2 id="compareTitle" class="compare-title">Player Comparison</h2>
     <div class="compare-grid" id="compareGrid"></div>
   </div>
 </div>
 
 <main class="container grid">
   <!-- Leaderboard -->
-  <section class="card">
+  <section class="card leaderboardCard">
     <h2>Leaderboard</h2>
     <div class="tableWrap">
       <table id="leaderboard">
@@ -91,7 +94,7 @@
   </section>
 
   <!-- Player profile -->
-  <section class="card">
+  <section class="card profileCard">
     <div class="card-head">
       <h2 id="profileTitle">Select a player</h2>
       <div id="periodSwitch" class="dateRange">
@@ -102,9 +105,15 @@
     </div>
 
     <div class="stats">
-      <div class="stat">
-        <span>Current rating</span>
-        <strong id="currentRating">—</strong>
+      <div class="stat" title="Closing rating: the rating at the end of the previous work day (work days run 07:30–07:30 Kyiv time)">
+        <span>Closing rating</span>
+        <strong id="closingRating">—</strong>
+        <small id="closingRatingNote" class="stat-note">—</small>
+      </div>
+      <div id="liveStat" class="stat stat-live" title="Latest rating, including the current work day's results">
+        <span><i class="live-dot" aria-hidden="true"></i>Live rating</span>
+        <strong id="liveRating">—</strong>
+        <small id="liveRatingNote" class="stat-note">—</small>
       </div>
     </div>
 
@@ -113,8 +122,9 @@
       <div id="chartTip" class="chartTip" hidden></div>
     </div>
 
-    <h3>History</h3>
-    <ul id="history"></ul>
+    <h3 id="historyTitle">History</h3>
+    <!-- tabindex: a scrolling list with nothing focusable inside still scrolls by keyboard (Safari) -->
+    <ul id="history" tabindex="0" aria-labelledby="historyTitle"></ul>
   </section>
 
   <!-- Avatar / Photo block -->
@@ -136,21 +146,20 @@
 
 <button id="backToTop" class="back-to-top" type="button" aria-label="Back to top">↑</button>
 
+<!-- Non-blocking notice when a refresh fails (a click or Escape dismisses it) -->
+<div id="loadNotice" class="load-notice" hidden></div>
+
+<!-- Screen reader announcements (search results, compare picks, refresh). Always in the page:
+     a live region that appears together with its text is often not read out. -->
+<div id="a11yStatus" class="visually-hidden" role="status"></div>
+
 <footer>
   <span>Created by @Sfg_m</span>
 </footer>
 
+<script src="./js/common.js" defer></script>
 <script src="./js/sheets.js" defer></script>
 <script src="./js/engine.js" defer></script>
 <script src="./js/app.js" defer></script>
-<script>
-  (function() {
-    var m = document.cookie.match("(?:^|; )esb_admin=([^;]*)");
-    if (m && m[1]) {
-      var el = document.getElementById("adminLink");
-      if (el) el.style.display = "";
-    }
-  })();
-</script>
 </body>
 </html>

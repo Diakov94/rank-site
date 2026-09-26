@@ -2,19 +2,21 @@
  * ESportsBattle Admin Panel — styles
  * ============================================================ */
 
-/* ===== Global mobile fix ===== */
-html, body { overflow-x: hidden; }
+/* The page is a column at least one screen tall: the ALPHA strip (styles.css) comes first
+ * and the login screen fills the rest, so the strip adds no scrolling. The panel is a plain
+ * block inside it, laid out as before. */
+body { display:flex; flex-direction:column; min-height:100vh; min-height:100dvh; }
 
 /* ===== Login ===== */
-.login-screen { min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px; }
+.login-screen { flex:1 0 auto; display:flex; align-items:center; justify-content:center; padding:24px; }
 .login-card { width:100%; max-width:360px; background:var(--card-bg); border:1px solid var(--card-border); border-radius:var(--radius-lg); padding:32px; box-shadow:var(--shadow-card); animation:fadeIn 320ms var(--ease) both; }
 .login-card h2 { margin:0 0 4px; font-size:22px; }
 .field { margin-bottom:16px; }
 .field label { display:block; font-size:12px; opacity:0.7; margin-bottom:6px; text-transform:uppercase; letter-spacing:0.04em; }
 .field input[type=password],
-.field input[type=email] { width:100%; padding:10px 12px; border-radius:var(--radius-sm); border:1px solid var(--soft-border); background:var(--soft-bg); color:inherit; font:inherit; font-size:15px; outline:none; transition:border-color var(--t) var(--ease),box-shadow var(--t) var(--ease); }
+.field input[type=email] { width:100%; padding:10px 12px; border-radius:var(--radius-sm); border:1px solid var(--input-border); background:var(--soft-bg); color:inherit; font:inherit; font-size:15px; outline:none; transition:border-color var(--t) var(--ease),box-shadow var(--t) var(--ease); }
 .field input[type=password]:focus,
-.field input[type=email]:focus { border-color:var(--accent-border); box-shadow:0 0 0 3px rgba(53,192,122,0.15); }
+.field input[type=email]:focus { border-color:var(--accent); box-shadow:0 0 0 3px rgba(53,192,122,0.15); }
 .btn-primary { width:100%; padding:12px; border-radius:var(--radius-sm); border:none; background:var(--accent); color:#0b0f14; font:inherit; font-size:15px; font-weight:700; cursor:pointer; transition:background var(--t) var(--ease),transform var(--t) var(--ease); }
 .btn-primary:hover { background:#43d088; }
 .btn-primary:active { transform:translateY(1px); }
@@ -24,6 +26,8 @@ html, body { overflow-x: hidden; }
 .admin-header { padding:16px 0; border-bottom:1px solid rgba(255,255,255,0.08); position:sticky; top:0; z-index:50; backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px); background:rgba(11,15,20,0.6); }
 .admin-header-row { display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; }
 .admin-title { margin:0; font-size:20px; }
+.admin-title:focus { outline:none; } /* focused by script when the panel opens (tabindex=-1), not a control */
+.admin-header-actions { display:flex; gap:8px; align-items:center; }
 
 /* ===== Tabs ===== */
 .admin-tabs {
@@ -47,11 +51,12 @@ html, body { overflow-x: hidden; }
 
 /* ===== Player section ===== */
 .admin-search { margin-bottom:12px; }
-.admin-search input { width:100%; padding:10px 14px; border-radius:var(--radius-sm); border:1px solid var(--soft-border); background:var(--soft-bg); color:inherit; font:inherit; outline:none; transition:border-color var(--t) var(--ease),box-shadow var(--t) var(--ease); }
-.admin-search input:focus { border-color:var(--accent-border); box-shadow:0 0 0 3px rgba(53,192,122,0.15); }
+.admin-search input { width:100%; padding:10px 14px; border-radius:var(--radius-sm); border:1px solid var(--input-border); background:var(--soft-bg); color:inherit; font:inherit; outline:none; transition:border-color var(--t) var(--ease),box-shadow var(--t) var(--ease); }
+.admin-search input:focus { border-color:var(--accent); box-shadow:0 0 0 3px rgba(53,192,122,0.15); }
 .player-list { display:flex; flex-direction:column; gap:8px; padding-bottom:32px; }
 .player-row { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:10px 14px; border-radius:var(--radius-md); background:var(--card-bg); border:1px solid var(--card-border); transition:background var(--t) var(--ease),border-color var(--t) var(--ease),opacity var(--t) var(--ease); }
-.player-row--hidden { opacity:0.45; background:rgba(255,118,118,0.04); border-color:rgba(255,118,118,0.2); }
+/* Still dimmed, but its rating, "Hidden" label and delete button keep 4.5:1, hovered too (the rows stay usable) */
+.player-row--hidden { opacity:0.92; background:rgba(255,118,118,0.04); border-color:rgba(255,118,118,0.2); }
 .player-row-info { display:flex; align-items:center; gap:12px; min-width:0; }
 .player-row-avatar { width:40px; height:40px; border-radius:50%; object-fit:cover; border:1px solid var(--card-border); flex-shrink:0; background:rgba(0,0,0,0.25); }
 .player-row-nick { font-weight:600; font-size:14px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
@@ -64,13 +69,19 @@ html, body { overflow-x: hidden; }
 .toggle input:checked + .toggle-track { background:rgba(53,192,122,0.25); border-color:var(--accent-border); }
 .toggle-thumb { position:absolute; top:2px; left:2px; width:18px; height:18px; border-radius:50%; background:#ff7676; transition:transform var(--t) var(--ease),background var(--t) var(--ease); }
 .toggle input:checked + .toggle-track .toggle-thumb { transform:translateX(20px); background:var(--accent); }
+.toggle input:focus-visible + .toggle-track { outline:2px solid var(--accent); outline-offset:2px; } /* the real checkbox is invisible */
 .toggle-label { font-size:13px; opacity:0.75; width:52px; }
 .loading-msg { opacity:0.6; padding:24px 0; text-align:center; font-size:14px; }
+.load-error { color:#ff7676; padding:16px 0; margin:0; text-align:center; font-size:14px; }
+.load-error-box { margin-bottom:16px; padding:0 14px; border-radius:10px; border:1px solid rgba(255,118,118,0.35); background:rgba(255,118,118,0.08); }
+.load-error-box .load-error { padding:10px 0; font-size:13px; text-align:left; }
 
 /* ===== Row actions ===== */
 .row-actions { display:flex; align-items:center; gap:8px; flex-shrink:0; }
 .upload-btn { display:flex; align-items:center; justify-content:center; width:32px; height:32px; border-radius:var(--radius-sm); background:var(--soft-bg); border:1px solid var(--soft-border); cursor:pointer; font-size:15px; transition:background var(--t) var(--ease),border-color var(--t) var(--ease); flex-shrink:0; }
 .upload-btn:hover { background:rgba(53,192,122,0.12); border-color:var(--accent-border); }
+/* The file input inside is visually hidden, so its keyboard focus shows on the button */
+.upload-btn:has(input:focus-visible) { outline:2px solid var(--accent); outline-offset:2px; }
 .trophy-btn { display:flex; align-items:center; justify-content:center; width:32px; height:32px; border-radius:var(--radius-sm); background:var(--soft-bg); border:1px solid var(--soft-border); cursor:pointer; font-size:15px; transition:background var(--t) var(--ease),border-color var(--t) var(--ease); flex-shrink:0; }
 .trophy-btn:hover { background:rgba(218,184,35,0.12); border-color:rgba(218,184,35,0.5); }
 .trophy-btn.has-ach { border-color:rgba(218,184,35,0.6); background:rgba(218,184,35,0.1); }
@@ -80,9 +91,9 @@ html, body { overflow-x: hidden; }
 .dash-card { background:var(--card-bg); border:1px solid var(--card-border); border-radius:var(--radius-md); padding:16px 12px; text-align:center; }
 .dash-card-val { font-size:30px; font-weight:700; font-variant-numeric:tabular-nums; color:var(--accent); line-height:1; }
 .dash-card-label { font-size:11px; opacity:0.55; margin-top:6px; text-transform:uppercase; letter-spacing:0.04em; }
-.dash-h3 { font-size:11px; font-weight:700; opacity:0.45; margin:22px 0 8px; text-transform:uppercase; letter-spacing:0.07em; }
+.dash-h3 { font-size:11px; font-weight:700; opacity:0.5; margin:22px 0 8px; text-transform:uppercase; letter-spacing:0.07em; }
 .mover-row { display:flex; align-items:center; gap:10px; padding:8px 12px; border-radius:var(--radius-sm); background:var(--card-bg); border:1px solid var(--card-border); margin-bottom:6px; }
-.mover-rank { font-size:11px; opacity:0.35; width:16px; text-align:center; flex-shrink:0; }
+.mover-rank { font-size:11px; opacity:0.5; width:16px; text-align:center; flex-shrink:0; }
 .mover-nick { flex:1; font-size:13px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
 .mover-delta { font-size:13px; font-weight:700; font-variant-numeric:tabular-nums; flex-shrink:0; }
 .group-bar-row { display:flex; align-items:center; gap:10px; font-size:13px; margin-bottom:7px; }
@@ -104,20 +115,19 @@ html, body { overflow-x: hidden; }
 .month-toggle:hover { background:var(--hover-bg); }
 .month-arrow { font-size:10px; opacity:0.45; display:inline-block; transition:transform 220ms var(--ease); }
 .month-toggle.open .month-arrow { transform:rotate(180deg); }
+/* Closed accordions are display:none, so an open one is never clipped however many players it lists. */
 .month-grid {
-  display:grid; grid-template-columns:repeat(auto-fill, minmax(108px, 1fr));
-  gap:7px; padding:8px 0 4px; overflow:hidden;
-  max-height:0; opacity:0; pointer-events:none;
-  transition:max-height 350ms var(--ease), opacity 250ms var(--ease), padding 250ms;
+  display:none; grid-template-columns:repeat(auto-fill, minmax(108px, 1fr));
+  gap:7px; padding:8px 0 4px;
 }
-.month-grid.open { max-height:2000px; opacity:1; pointer-events:auto; padding:8px 0 4px; }
+.month-grid.open { display:grid; animation:fadeIn 250ms var(--ease) both; }
 .player-tile {
   background:var(--card-bg); border:1px solid var(--card-border);
   border-radius:var(--radius-md); padding:10px 8px 9px; text-align:center;
   transition:border-color var(--t) var(--ease);
 }
 .player-tile.tile-active { border-color:rgba(82,209,138,0.30); }
-.player-tile.tile-inactive { opacity:0.50; }
+.player-tile.tile-inactive { opacity:0.8; } /* the red "Not played" count keeps 4.6:1 */
 .tile-nick { font-size:12px; font-weight:700; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; margin-bottom:7px; }
 .tile-stat { font-size:11px; line-height:1.7; }
 .tile-played { color:#52d18a; }
@@ -134,16 +144,17 @@ html, body { overflow-x: hidden; }
 }
 .year-toggle:hover { background:rgba(53,192,122,0.14); }
 .year-toggle.open .month-arrow { transform:rotate(180deg); }
-.year-body { overflow:hidden; max-height:0; opacity:0; pointer-events:none; transition:max-height 400ms var(--ease), opacity 300ms var(--ease); padding:0; }
-.year-body.open { max-height:9999px; opacity:1; pointer-events:auto; padding:8px 0 4px; }
+.year-body { display:none; padding:8px 0 4px; }
+.year-body.open { display:block; animation:fadeIn 300ms var(--ease) both; }
 
 /* ===== Log ===== */
 .log-wrap { background:var(--card-bg); border:1px solid var(--card-border); border-radius:var(--radius-md); overflow:hidden; }
+.log-wrap:focus-visible { outline:2px solid var(--accent); outline-offset:2px; } /* a Tab stop, so the keyboard can scroll it */
 .log-table { width:100%; border-collapse:collapse; font-size:13px; }
-.log-table th { text-align:left; padding:9px 12px; border-bottom:1px solid var(--card-border); font-size:11px; opacity:0.45; text-transform:uppercase; letter-spacing:0.05em; font-weight:600; }
+.log-table th { text-align:left; padding:9px 12px; border-bottom:1px solid var(--card-border); font-size:11px; opacity:0.5; text-transform:uppercase; letter-spacing:0.05em; font-weight:600; }
 .log-table td { padding:9px 12px; border-bottom:1px solid var(--row-border); vertical-align:top; }
 .log-table tbody tr:last-child td { border-bottom:none; }
-.log-time { opacity:0.45; white-space:nowrap; font-variant-numeric:tabular-nums; font-size:12px; }
+.log-time { opacity:0.5; white-space:nowrap; font-variant-numeric:tabular-nums; font-size:12px; }
 .log-action { font-weight:600; white-space:nowrap; }
 .log-details { opacity:0.7; }
 
@@ -154,13 +165,16 @@ html, body { overflow-x: hidden; }
 .group-color-swatch { display:block; width:38px; height:38px; border-radius:var(--radius-sm); border:1px solid rgba(255,255,255,0.15); transition:transform 120ms; }
 .group-color-wrap:hover .group-color-swatch { transform:scale(1.08); }
 .group-color-input { position:absolute; inset:0; opacity:0; width:100%; height:100%; cursor:pointer; padding:0; border:none; }
-.group-name-input { flex:1; min-width:100px; padding:8px 12px; border-radius:var(--radius-sm); border:1px solid var(--soft-border); background:var(--soft-bg); color:inherit; font:inherit; outline:none; }
-.group-min-label { font-size:11px; opacity:0.45; white-space:nowrap; }
-.group-min-input { width:90px; padding:8px 12px; border-radius:var(--radius-sm); border:1px solid var(--soft-border); background:var(--soft-bg); color:inherit; font:inherit; outline:none; font-variant-numeric:tabular-nums; }
-.group-name-input:focus, .group-min-input:focus { border-color:var(--accent-border); box-shadow:0 0 0 3px rgba(53,192,122,0.15); }
+/* The colour input is transparent, so its keyboard focus shows on the swatch */
+.group-color-wrap:has(.group-color-input:focus-visible) .group-color-swatch { outline:2px solid var(--accent); outline-offset:2px; }
+.group-name-input { flex:1; min-width:100px; padding:8px 12px; border-radius:var(--radius-sm); border:1px solid var(--input-border); background:var(--soft-bg); color:inherit; font:inherit; outline:none; }
+.group-min-label { font-size:11px; opacity:0.5; white-space:nowrap; }
+.group-min-input { width:90px; padding:8px 12px; border-radius:var(--radius-sm); border:1px solid var(--input-border); background:var(--soft-bg); color:inherit; font:inherit; outline:none; font-variant-numeric:tabular-nums; }
+.group-name-input:focus, .group-min-input:focus { border-color:var(--accent); box-shadow:0 0 0 3px rgba(53,192,122,0.15); }
 
 /* ===== Achievement picker ===== */
-.ach-picker { position:fixed; z-index:200; background:var(--card-bg); border:1px solid var(--card-border); border-radius:var(--radius-md); padding:10px; min-width:230px; max-height:320px; overflow-y:auto; box-shadow:0 8px 32px rgba(0,0,0,0.55); }
+/* The card tint made opaque: the player rows under the popover no longer show through its text */
+.ach-picker { position:fixed; z-index:200; background:linear-gradient(var(--card-bg), var(--card-bg)), var(--bg); border:1px solid var(--card-border); border-radius:var(--radius-md); padding:10px; min-width:230px; max-height:320px; overflow-y:auto; box-shadow:0 8px 32px rgba(0,0,0,0.55); }
 .ach-picker-item { display:flex; align-items:center; gap:8px; padding:7px 6px; cursor:pointer; border-radius:var(--radius-sm); font-size:13px; }
 .ach-picker-item:hover { background:var(--soft-bg); }
 .ach-picker-item img { width:28px; height:28px; border-radius:50%; object-fit:cover; background:#111; }
@@ -173,10 +187,11 @@ html, body { overflow-x: hidden; }
 
 /* New achievement form */
 .ach-create-form { display:none; flex-direction:column; gap:12px; padding:16px; background:var(--card-bg); border:1px solid var(--card-border); border-radius:var(--radius-md); margin-bottom:16px; }
+.ach-create-form.open { display:flex; }
 .ach-form-row { display:flex; flex-direction:column; gap:6px; }
 .ach-form-label { font-size:12px; opacity:0.6; text-transform:uppercase; letter-spacing:0.04em; }
-.ach-form-input { padding:9px 12px; border-radius:var(--radius-sm); border:1px solid var(--soft-border); background:var(--soft-bg); color:inherit; font:inherit; outline:none; }
-.ach-form-input:focus { border-color:var(--accent-border); box-shadow:0 0 0 3px rgba(53,192,122,0.15); }
+.ach-form-input { padding:9px 12px; border-radius:var(--radius-sm); border:1px solid var(--input-border); background:var(--soft-bg); color:inherit; font:inherit; outline:none; }
+.ach-form-input:focus { border-color:var(--accent); box-shadow:0 0 0 3px rgba(53,192,122,0.15); }
 .ach-form-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; margin-top:4px; }
 
 /* Achievement cards */
@@ -186,7 +201,7 @@ html, body { overflow-x: hidden; }
 .ach-card-icon { width:44px; height:44px; border-radius:50%; object-fit:cover; border:2px solid rgba(218,184,35,0.4); background:#111; flex-shrink:0; }
 .ach-card-info { flex:1; min-width:0; }
 .ach-card-name { font-weight:600; font-size:14px; }
-.ach-card-url { font-size:12px; opacity:0.55; margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.ach-card-url { font-size:12px; opacity:0.74; margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .ach-card-url a { color:var(--accent); text-decoration:none; }
 .ach-card-url a:hover { text-decoration:underline; }
 .ach-card-actions { display:flex; gap:8px; flex-shrink:0; }
@@ -195,8 +210,215 @@ html, body { overflow-x: hidden; }
 .ach-card-edit { display:none; flex-direction:column; gap:10px; padding-top:12px; border-top:1px solid var(--card-border); margin-top:12px; }
 .ach-edit-row { display:flex; flex-direction:column; gap:5px; }
 .ach-edit-label { font-size:11px; opacity:0.55; text-transform:uppercase; letter-spacing:0.04em; }
-.ach-edit-input { padding:8px 12px; border-radius:var(--radius-sm); border:1px solid var(--soft-border); background:var(--soft-bg); color:inherit; font:inherit; outline:none; }
-.ach-edit-input:focus { border-color:var(--accent-border); box-shadow:0 0 0 3px rgba(53,192,122,0.15); }
+.ach-edit-input { padding:8px 12px; border-radius:var(--radius-sm); border:1px solid var(--input-border); background:var(--soft-bg); color:inherit; font:inherit; outline:none; }
+.ach-edit-input:focus { border-color:var(--accent); box-shadow:0 0 0 3px rgba(53,192,122,0.15); }
 
 /* Shared field label */
 .tg-label { display:block; font-size:12px; opacity:0.7; margin-bottom:6px; text-transform:uppercase; letter-spacing:0.04em; }
+
+/* Text for screen readers only. The status and error messages use it while empty: they stay in
+ * the page (a live region must exist before its text arrives to be read out) but take no room. */
+.sr-only,
+.error-msg:empty, .form-msg:empty, #addPlayerMsg:empty, #resetMsg:empty, #formulaMsg:empty {
+  position:absolute !important; width:1px; height:1px; margin:-1px; padding:0; overflow:hidden;
+  clip:rect(0 0 0 0); clip-path:inset(50%); white-space:nowrap; border:0;
+}
+
+/* ===== Inline forms (Add player, Adjustments, Monthly Reset selectors) ===== */
+.admin-form { display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap; margin-bottom:16px; padding:14px; background:rgba(255,255,255,0.04); border-radius:10px; }
+.admin-form--roomy { margin-bottom:20px; padding:16px; }
+.admin-form .field, .reset-controls .field { margin:0; }
+.admin-form-grow { flex:1; min-width:140px; }
+/* color-scheme: light native date, number and select icons on the dark fill */
+.admin-input { background:#1a2030; border:1px solid var(--input-border); color:#fff; padding:6px 10px; border-radius:6px; font-size:13px; color-scheme:dark; }
+/* The browser's grey placeholder is 3.5:1 on these fills */
+.admin-input::placeholder, .ach-form-input::placeholder, .ach-edit-input::placeholder,
+.group-name-input::placeholder, .field input::placeholder { color:var(--placeholder-color); opacity:1; }
+.admin-input--nick { width:150px; }
+.admin-input--rating { width:140px; } /* the whole "Enter rating" placeholder fits beside the spin arrows */
+.admin-input--adj-rating { width:110px; }
+.admin-input--player { min-width:140px; }
+.admin-input--year { min-width:90px; }
+.admin-input--month { min-width:130px; }
+.admin-input--full { width:100%; }
+.reset-controls { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:20px; }
+.reset-controls-offset { margin-top:18px; } /* lines the button up with the selects under their labels */
+.formula-bar { align-items:flex-end; }
+
+/* ===== Roles: what the signed-in account may see =====
+ * Tabs and controls the role does not allow carry the hidden attribute; it wins over any
+ * display a class sets (.admin-form is flex, for one). */
+#panelSection [hidden] { display:none !important; }
+
+/* Header: "<email> · <role>" beside the links; a long email shortens, the role stays */
+.admin-identity { display:inline-flex; align-items:baseline; gap:6px; min-width:0; max-width:340px; font-size:13px; white-space:nowrap; }
+.admin-identity-email { min-width:0; overflow:hidden; text-overflow:ellipsis; opacity:0.7; }
+.admin-identity-sep { opacity:0.4; flex-shrink:0; }
+.admin-identity-role { flex-shrink:0; color:var(--accent); font-weight:600; }
+
+/* More than the original eight tabs: slightly narrower tabs, so a desktop row still fits them */
+@media (min-width: 1100px) {
+  .admin-tabs--compact { gap:2px; }
+  .admin-tabs--compact .admin-tab { padding:9px 10px; }
+}
+
+/* Shared bits of the Users and Roles tabs */
+.btn.btn-accent { background:var(--accent); color:#0b0f14; font-weight:700; font-size:13px; white-space:nowrap; }
+.btn.btn-accent:hover { background:#43d088; }
+.btn.btn-accent:disabled { opacity:0.5; cursor:not-allowed; }
+.form-msg { font-size:13px; }
+.admin-tag { display:inline-block; margin-left:8px; padding:1px 8px; border-radius:99px; border:1px solid var(--accent-border); background:var(--accent-soft); color:var(--accent); font-size:11px; font-weight:600; vertical-align:1px; white-space:nowrap; }
+.admin-tag--gold { border-color:rgba(218,184,35,0.5); background:rgba(218,184,35,0.1); color:#dab823; }
+.admin-input--email { width:220px; }
+.admin-input--password { width:180px; }
+.admin-input--role { min-width:170px; }
+.admin-input--role-name { width:180px; }
+.row-status { font-size:12px; color:#ff7676; opacity:0.9; padding:0 4px; } /* "Hidden" without the visibility switch */
+
+/* ===== Users ===== */
+.user-list { display:flex; flex-direction:column; gap:8px; }
+.user-row { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px 12px; padding:10px 14px; border-radius:var(--radius-md); background:var(--card-bg); border:1px solid var(--card-border); transition:opacity var(--t) var(--ease); }
+.user-row--self { border-color:var(--accent-border); }
+.user-row-info { flex:1 1 260px; min-width:0; }
+.user-row-email { display:flex; align-items:center; min-width:0; font-weight:600; font-size:14px; }
+.user-row-email-text { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.user-row-meta { margin-top:2px; font-size:12px; opacity:0.6; font-variant-numeric:tabular-nums; }
+.user-row-actions { display:flex; align-items:center; flex-wrap:wrap; justify-content:flex-end; gap:8px; }
+.user-role-static { font-size:13px; opacity:0.75; }
+.user-pw-form { flex:1 1 100%; display:flex; align-items:center; flex-wrap:wrap; gap:8px; padding-top:10px; border-top:1px solid var(--card-border); }
+.user-pw-input { width:260px; }
+
+/* ===== Roles ===== */
+.role-list { display:flex; flex-direction:column; gap:10px; }
+.role-card { padding:14px; border-radius:var(--radius-md); background:var(--card-bg); border:1px solid var(--card-border); transition:opacity var(--t) var(--ease); }
+.role-card--super { border-color:rgba(218,184,35,0.35); }
+.role-card-head { display:flex; align-items:flex-start; justify-content:space-between; gap:12px; }
+.role-card-info { flex:1; min-width:0; }
+.role-card-name { font-weight:600; font-size:15px; overflow-wrap:anywhere; }
+.role-card-desc { margin-top:3px; font-size:13px; opacity:0.65; overflow-wrap:anywhere; }
+.role-card-meta { margin-top:4px; font-size:12px; opacity:0.5; }
+.role-card-actions { display:flex; gap:8px; flex-shrink:0; }
+.role-card-edit { display:flex; align-items:flex-end; flex-wrap:wrap; gap:10px; margin-top:12px; padding-top:12px; border-top:1px solid var(--card-border); }
+.role-card-edit-actions { display:flex; gap:8px; }
+.role-perms { display:grid; grid-template-columns:repeat(auto-fill, minmax(250px, 1fr)); gap:2px 16px; margin-top:12px; padding-top:10px; border-top:1px solid var(--card-border); }
+.role-perm { display:flex; align-items:center; gap:8px; padding:4px 0; font-size:13px; cursor:pointer; }
+.role-perm input { flex-shrink:0; width:16px; height:16px; margin:0; accent-color:var(--accent); cursor:inherit; }
+.role-locked { margin:12px 0 0; padding-top:10px; border-top:1px solid var(--card-border); font-size:13px; opacity:0.7; }
+
+/* ============================================================
+ * Tablet and phone. Everything below applies under 1100px only;
+ * the desktop layout above is unchanged. Same breakpoints as the
+ * public page (styles.css): phone < 768px, tablet 768-1099px.
+ * ============================================================ */
+@media (max-width: 1099.98px) {
+  /* Tables scroll sideways inside their own box, not the page */
+  .log-wrap, .adj-table-wrap { overflow-x:auto; overflow-y:hidden; -webkit-overflow-scrolling:touch; }
+
+  /* Long names, file names and error text shorten or wrap instead of widening a row */
+  .player-row { flex-wrap:wrap; }
+  .player-row-info > div { min-width:0; }
+  .ach-card-name, .load-error, .ach-picker-item span { overflow-wrap:anywhere; }
+  .ach-picker-item span { min-width:0; }
+  #achIconName, .ach-edit-filename { min-width:0; overflow-wrap:anywhere; }
+
+  /* Touch-sized row actions */
+  .upload-btn, .trophy-btn { width:40px; height:40px; }
+  .toggle { min-height:40px; }
+  .delete-player-btn, .adj-del-btn { min-width:40px; min-height:40px; }
+
+  /* Users and Roles: long emails and names wrap, touch-sized actions and permission rows */
+  .user-row-email-text { white-space:normal; overflow-wrap:anywhere; }
+  .user-del-btn { min-width:40px; min-height:40px; }
+  .role-perm { min-height:40px; padding:0; }
+  .role-perm input { width:18px; height:18px; }
+}
+
+@media (max-width: 767.98px) {
+  /* Header: title, then the links wrap below it when they do not fit */
+  .admin-header { padding:10px 0; }
+  .admin-header-row { gap:8px 12px; }
+  .admin-title { font-size:18px; }
+  .admin-header-actions { flex-wrap:wrap; }
+  .admin-header-actions .btn { display:inline-flex; align-items:center; }
+  .admin-tabs { margin-top:10px; }
+  .admin-tab { min-height:40px; padding:9px 14px; }
+  #panelSection .btn { min-height:40px; }
+
+  /* Forms stack, with full-width fields and buttons */
+  .admin-form, .reset-controls, .formula-bar { flex-direction:column; align-items:stretch; }
+  .admin-form > *, .reset-controls > *, .formula-bar > * { width:100%; min-width:0; flex:none; }
+  .admin-form .admin-input, .reset-controls .admin-input, .formula-bar input { display:block; width:100%; min-width:0; min-height:40px; }
+  .reset-controls-offset { margin-top:0; }
+  .formula-bar .field { margin:0; }
+  /* 16px text keeps iOS from zooming into a field on focus */
+  .admin-input, .formula-bar input, .field input[type=password], .field input[type=email] { font-size:16px; }
+
+  /* Player and reset rows: the actions go on their own line below the name */
+  .player-row { gap:8px 12px; }
+  .player-row-info { flex:1 1 100%; }
+  .row-actions { flex:1 1 100%; flex-wrap:wrap; }
+  .delete-player-btn { margin-left:auto; }
+
+  /* Group rows: colour + name, then one labelled field per line, then Save */
+  .group-row { display:grid; grid-template-columns:auto minmax(0, 1fr); gap:8px 10px; }
+  .group-name-input, .group-min-input { width:100%; min-width:0; }
+  .group-save-btn { grid-column:1 / -1; }
+
+  /* Achievements: the buttons go below the name and link */
+  .ach-section-header { flex-wrap:wrap; gap:8px; }
+  .ach-card-view { flex-wrap:wrap; }
+  .ach-card-info { flex-basis:calc(100% - 56px); }
+  .ach-card-actions { flex:1 1 100%; justify-content:flex-end; }
+
+  /* Header: the account and role get their own line above the links */
+  .admin-identity { flex:1 1 100%; max-width:100%; }
+
+  /* Users: email and dates, then the role on its own line, then Set password and Delete */
+  .user-row-info { flex:1 1 100%; }
+  .user-row-actions { flex:1 1 100%; justify-content:flex-start; }
+  .user-row-actions .user-role-select { flex:1 1 100%; width:100%; min-width:0; min-height:40px; }
+  .user-del-btn { margin-left:auto; }
+  .user-pw-form > * { flex:1 1 auto; }
+  .user-pw-form .user-pw-input { flex:1 1 100%; width:100%; min-height:40px; }
+  .user-pw-form .form-msg { flex-basis:100%; }
+
+  /* Roles: the buttons go below the name, fields stack, one permission per line */
+  .role-card-head { flex-wrap:wrap; }
+  .role-card-actions { flex:1 1 100%; justify-content:flex-end; }
+  .role-card-edit { flex-direction:column; align-items:stretch; }
+  .role-card-edit > * { flex:none; min-width:0; }
+  .role-card-edit .admin-input { display:block; width:100%; min-width:0; min-height:40px; }
+  .role-card-edit-actions > .btn { flex:1 1 0; }
+  .role-perms { grid-template-columns:minmax(0, 1fr); }
+
+  /* Dashboard: two cards per row */
+  .dash-grid { grid-template-columns:repeat(auto-fill, minmax(130px, 1fr)); gap:8px; }
+  .dash-card { padding:14px 10px; }
+  .dash-card-val { font-size:24px; }
+  .group-bar-name { width:90px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+  /* Login */
+  .login-screen { padding:16px; }
+  .login-card { padding:24px 20px; }
+}
+
+/* ===== Touch screens under 1100px: finger-sized form controls ===== */
+@media (max-width: 1099.98px) and (pointer: coarse) {
+  #panelSection input:not([type="checkbox"]):not([type="file"]):not([type="color"]),
+  #panelSection select,
+  #panelSection .btn { min-height: 40px; }
+}
+
+/* ===== Mouse and trackpad under 1100px: the tab row wraps =====
+ * It would scroll sideways with no scrollbar, which suits a finger but hides the last tabs
+ * (Users, Roles) from a mouse, whose wheel does not scroll it. */
+@media (max-width: 1099.98px) and (pointer: fine) {
+  .admin-tabs { flex-wrap:wrap; }
+}
+
+/* ===== Narrow and short screens (400% zoom, a phone on its side) =====
+ * The wrapped tab row makes the header taller than the screen; stuck at the top it would
+ * cover every tab's content, so it scrolls away with the page instead. */
+@media (max-width: 1099.98px) and (max-height: 450px) {
+  .admin-header { position:static; }
+}
