@@ -86,7 +86,7 @@ function adminEmail() {
   return (st.session && st.session.email) || null;
 }
 
-/* Whether sessions `a` and `b` belong to the same user: by user id when both have one (older
+/* Whether `a` and `b` ({ user_id, email }, such as two sessions) belong to the same user: by user id when both have one (older
  * stored sessions lack it), else by email, ignoring case. */
 function sameSessionUser(a, b) {
   if (a.user_id && b.user_id) return a.user_id === b.user_id;
@@ -322,22 +322,7 @@ async function tryLogin() {
       return;
     }
     storeSession(sessionFromAuth(data, { email: email }));
-    var access;
-    try {
-      access = await fetchAccess();
-    } catch (e) {
-      if (!st.session) return; // a rejected token already ended the session and said so
-      console.error("Access check failed:", e);
-      await endSession();
-      showLoginError(ACCESS_CHECK_FAILED_MSG);
-      return;
-    }
-    if (!access.role) {
-      await endSession();
-      showLoginError(noAccessMessage(access));
-      return;
-    }
-    st.access = access;
+    if (!(await verifyAccess(function() { return false; }))) return;
     passwordInput.value = "";
     /* After a session ended in an open panel, the page still holds the previous account's
      * data (users, roles, log). Start from a clean page instead: it resumes the session just
@@ -377,17 +362,21 @@ async function checkIsAdmin() {
  * own; hiding a control only keeps the panel honest about what will work. */
 var ACCESS_CHECK_FAILED_MSG = "Could not verify admin access. Try again.";
 
-/* Every tab in display order, and the permission a tab needs (tabs not listed are open to
- * every role). The Roles tab is for the super admin only (see tabAllowed). */
-var TAB_IDS = ["players", "achievements", "dashboard", "log", "groups", "reset", "adjustments", "formula", "users", "roles"];
-var TAB_PERMISSIONS = {
-  log: "log.read",
-  groups: "groups.edit",
-  reset: "reset.run",
-  adjustments: "adjustments.edit",
-  formula: "formula.edit",
-  users: "users.manage",
+/* Every tab in display order: the permission it needs (none: open to every role), superOnly
+ * for the super admin's Roles tab, and what opening it loads. */
+var TABS = {
+  players: {},
+  achievements: {},
+  dashboard: { load: renderDashboard },
+  log: { perm: "log.read", load: loadLog },
+  groups: { perm: "groups.edit", load: loadGroupsTab },
+  reset: { perm: "reset.run", load: loadResetTab },
+  adjustments: { perm: "adjustments.edit", load: loadAdjustmentsTab },
+  formula: { perm: "formula.edit", load: loadFormulaSettings },
+  users: { perm: "users.manage", load: loadUsersTab },
+  roles: { superOnly: true, load: loadRolesTab }, // creating and editing roles
 };
+var TAB_IDS = Object.keys(TABS);
 
 /* What the signed-in account may do: { role, permissions, legacy }. role is
  * { id, name, is_super } or null (no access); permissions is a Set of the keys my_access()
@@ -443,8 +432,8 @@ function isSuperAdmin() {
 
 function tabAllowed(tab) {
   if (TAB_IDS.indexOf(tab) === -1 || !st.access || !st.access.role) return false;
-  if (tab === "roles") return isSuperAdmin(); // creating and editing roles is super-admin only
-  return !TAB_PERMISSIONS[tab] || can(TAB_PERMISSIONS[tab]);
+  if (TABS[tab].superOnly) return isSuperAdmin();
+  return !TABS[tab].perm || can(TABS[tab].perm);
 }
 
 /* A role id as a number, or null. */
@@ -452,12 +441,6 @@ function toRoleId(value) {
   if (value === null || value === undefined || value === "") return null;
   var n = Number(value);
   return Number.isSafeInteger(n) ? n : null;
-}
-
-/* The signed-in user's id (the session keeps it since this version; older stored sessions
- * get it at their next refresh). */
-function ownUserId() {
-  return (st.session && st.session.user_id) || "";
 }
 
 function setHidden(id, hidden) {
@@ -558,24 +541,31 @@ async function resumeSession() {
     return;
   }
   if (superseded()) return;
+  if (await verifyAccess(superseded)) enterPanel();
+}
+
+/* Asks what the signed-in account may do and keeps it in st.access. When the check fails or
+ * the account has no role, it ends the session, says why and returns null. Once stale()
+ * reports that another login took over, it returns null and does nothing more. */
+async function verifyAccess(stale) {
   var access;
   try {
     access = await fetchAccess();
   } catch (err) {
-    if (superseded() || !st.session) return; // !st.session: a rejected token already said so
+    if (stale() || !st.session) return null; // !st.session: a rejected token already said so
     console.error("Access check failed:", err);
     await endSession();
     showLoginError(ACCESS_CHECK_FAILED_MSG);
-    return;
+    return null;
   }
-  if (superseded()) return;
+  if (stale()) return null;
   if (!access.role) {
     await endSession();
     showLoginError(noAccessMessage(access));
-    return;
+    return null;
   }
   st.access = access;
-  enterPanel();
+  return access;
 }
 
 async function loadAdminData() {
@@ -704,14 +694,8 @@ function switchTab(tab) {
     if (tabBox.left < rowBox.left) tabRow.scrollLeft -= rowBox.left - tabBox.left;
     else if (tabBox.right > rowBox.right) tabRow.scrollLeft += tabBox.right - rowBox.right;
   }
-  if (tab === "dashboard") renderDashboard();
-  if (tab === "log") loadLog();
-  if (tab === "groups") loadGroupsTab();
-  if (tab === "reset") loadResetTab();
-  if (tab === "adjustments") loadAdjustmentsTab();
-  if (tab === "formula") loadFormulaSettings();
-  if (tab === "users") loadUsersTab();
-  if (tab === "roles") loadRolesTab();
+  var load = TABS[tab].load;
+  if (load) load();
 }
 
 /* ===== Rating formula settings ===== */
@@ -1010,12 +994,7 @@ function fillAdjNickSelect() {
   var selected = select.value;
   var nicks = st.players.map(function(p) { return p.nick; }).sort(function(a, b) { return a.localeCompare(b); });
   select.replaceChildren();
-  nicks.forEach(function(nick) {
-    var opt = document.createElement("option");
-    opt.value = nick;
-    opt.textContent = nick;
-    select.appendChild(opt);
-  });
+  nicks.forEach(function(nick) { select.appendChild(makeOption(nick, nick, false)); });
   if (nicks.indexOf(selected) !== -1) select.value = selected;
 }
 
@@ -1750,8 +1729,7 @@ async function loadLog() {
     }
     var html = '<div class="log-wrap"><table class="log-table"><thead><tr><th>Time</th><th>Who</th><th>Action</th><th>Details</th></tr></thead><tbody>';
     rows.forEach(function(r) {
-      var d = new Date(r.created_at);
-      var timeStr = d.toLocaleDateString("uk-UA") + " " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      var timeStr = formatStamp(r.created_at, "—");
       html += '<tr>' +
         '<td class="log-time">' + escapeHtml(timeStr) + '</td>' +
         '<td class="log-details" style="color:var(--accent);font-size:12px;">' + escapeHtml(r.email || "—") + '</td>' +
@@ -2163,10 +2141,7 @@ function clearTypedPasswords() {
 }
 
 function isSelf(user) {
-  var me = ownUserId();
-  if (me) return user.id === me;
-  var email = adminEmail();
-  return !!email && user.email.toLowerCase() === email.toLowerCase();
+  return !!st.session && sameSessionUser({ user_id: user.id, email: user.email }, st.session);
 }
 
 function roleNameOf(roleId) {
@@ -2669,28 +2644,12 @@ if (adminSearch) adminSearch.addEventListener("input", debounce(function() {
 
 document.addEventListener("DOMContentLoaded", function() {
   /* Tab buttons */
-  var tabPlayers = document.getElementById("tabPlayers");
-  var tabAch     = document.getElementById("tabAchievements");
-  var tabDash    = document.getElementById("tabDashboard");
-  var tabLog     = document.getElementById("tabLog");
-  if (tabPlayers) tabPlayers.addEventListener("click", function() { switchTab("players"); });
-  if (tabAch)     tabAch.addEventListener("click",     function() { switchTab("achievements"); });
-  if (tabDash)    tabDash.addEventListener("click",    function() { switchTab("dashboard"); });
-  if (tabLog)     tabLog.addEventListener("click",     function() { switchTab("log"); });
-  var tabGroups = document.getElementById("tabGroups");
-  if (tabGroups)  tabGroups.addEventListener("click",  function() { switchTab("groups"); });
-  var tabReset = document.getElementById("tabReset");
-  if (tabReset) tabReset.addEventListener("click", function() { switchTab("reset"); });
-  var tabAdj = document.getElementById("tabAdjustments");
-  if (tabAdj) tabAdj.addEventListener("click", function() { switchTab("adjustments"); });
-  var tabFormula = document.getElementById("tabFormula");
-  if (tabFormula) tabFormula.addEventListener("click", function() { switchTab("formula"); });
+  TAB_IDS.forEach(function(key) {
+    var btn = document.getElementById(tabDomId("tab", key));
+    if (btn) btn.addEventListener("click", function() { switchTab(key); });
+  });
   var saveFormulaBtn = document.getElementById("saveFormulaBtn");
   if (saveFormulaBtn) saveFormulaBtn.addEventListener("click", saveFormulaSettings);
-  var tabUsers = document.getElementById("tabUsers");
-  if (tabUsers) tabUsers.addEventListener("click", function() { switchTab("users"); });
-  var tabRoles = document.getElementById("tabRoles");
-  if (tabRoles) tabRoles.addEventListener("click", function() { switchTab("roles"); });
 
   /* Users and Roles forms: the button, or Enter in a field, submits */
   [["createUserBtn", createUser, ["newUserEmail", "newUserPassword"]],

@@ -2,9 +2,6 @@
  * ESportsBattle Admin Panel — styles
  * ============================================================ */
 
-/* ===== Global mobile fix ===== */
-html, body { overflow-x: clip; }
-
 /* The page is a column at least one screen tall: the ALPHA strip (styles.css) comes first
  * and the login screen fills the rest, so the strip adds no scrolling. The panel is a plain
  * block inside it, laid out as before. */

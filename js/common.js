@@ -124,7 +124,6 @@ const KYIV_CLOCK = (() => {
     return new Intl.DateTimeFormat("en-CA", { ...options, timeZone: "Europe/Kiev" });
   }
 })();
-const WORK_TIMEZONE = KYIV_CLOCK.resolvedOptions().timeZone;
 
 /* Kyiv wall clock of an instant: { date: "YYYY-MM-DD", time: "HH:MM:SS" }. */
 function kyivWallClock(instant = new Date()) {
