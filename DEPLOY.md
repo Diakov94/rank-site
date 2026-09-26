@@ -61,7 +61,7 @@ where u.email = 'you@example.com' and r.is_super
 on conflict (user_id) do update set role_id = excluded.role_id;
 ```
 
-After that you can create every other user and role from the admin panel.
+Once steps 3 and 4 are done, you can create every other user and role from the admin panel.
 
 ### 3. Deploy the server functions
 
@@ -122,8 +122,8 @@ Merge the pull request so that your hosting publishes the new version.
 | What you see | What to do |
 | --- | --- |
 | "This account has no role in the admin panel." | Do step 2 for that account, or give it a role in the Users tab. |
-| "Could not verify admin access." | Check that both migrations ran (step 1). |
-| "Connection error. Try again." when logging in | The network or Supabase did not answer. You stay signed in; try again in a moment. |
+| "Could not verify admin access. Try again." | Check that both migrations ran (step 1). |
+| "Connection error. Try again." when logging in or opening the admin panel | The network failed, or Supabase answered with a server error (5xx). If your password was already accepted, you stay signed in; try again in a moment. |
 | The Users tab shows an error | The `admin-users` function is not deployed yet (step 3). |
 | The Users tab says "The server function rejected your sign-in (… Invalid JWT …)" | Deploy `admin-users` again with `--no-verify-jwt` (step 3). |
 | Locked out of the admin panel | The SQL Editor always works, whatever the roles are. Run step 2 again for your account. |
@@ -192,7 +192,7 @@ where u.email = 'you@example.com' and r.is_super
 on conflict (user_id) do update set role_id = excluded.role_id;
 ```
 
-Після цього всіх інших користувачів і ролі можна створювати в адмін-панелі.
+Коли виконаєте кроки 3 і 4, усіх інших користувачів і ролі можна буде створювати в адмін-панелі.
 
 ### 3. Розгорніть серверні функції
 
@@ -253,8 +253,8 @@ URL функції; вона лише копіює завершені матчі
 | Що ви бачите | Що робити |
 | --- | --- |
 | "This account has no role in the admin panel." | Виконайте крок 2 для цього облікового запису або призначте йому роль на вкладці Users. |
-| "Could not verify admin access." | Перевірте, що обидві міграції виконано (крок 1). |
-| "Connection error. Try again." під час входу | Мережа або Supabase не відповіли. Ви залишаєтеся в системі; спробуйте ще раз трохи пізніше. |
+| "Could not verify admin access. Try again." | Перевірте, що обидві міграції виконано (крок 1). |
+| "Connection error. Try again." під час входу або відкриття адмін-панелі | Стався збій мережі, або Supabase відповів помилкою сервера (5xx). Якщо пароль уже було прийнято, ви залишаєтеся в системі; спробуйте ще раз трохи пізніше. |
 | На вкладці Users показується помилка | Функцію `admin-users` ще не розгорнуто (крок 3). |
 | На вкладці Users написано "The server function rejected your sign-in (… Invalid JWT …)" | Розгорніть `admin-users` ще раз із `--no-verify-jwt` (крок 3). |
 | Немає доступу до адмін-панелі | SQL Editor працює завжди, незалежно від ролей. Виконайте крок 2 ще раз для свого облікового запису. |

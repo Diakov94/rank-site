@@ -86,10 +86,11 @@ adjustments saved during the day.
     whenever it was saved.
 
   Adjustments dated after the current work day (`workDayOf()`) wait until their date, so a
-  monthly reset saved ahead of time does not change ratings early. When the sheet already
-  has matches on the next day (its clock is a little ahead), that day counts as well; a
-  match dated further ahead is taken as a typo and releases nothing. An adjustment without a numeric `new_rating` or a
-  `YYYY-MM-DD` `applied_date` is ignored.
+  monthly reset saved ahead of time does not change ratings early. When the sheet's latest
+  match is on the next day (its clock is a little ahead), that day counts as well; when
+  the latest match is dated further ahead, it is taken as a typo and nothing after the
+  current work day is released, even if the next day also has matches. An adjustment
+  without a numeric `new_rating` or a `YYYY-MM-DD` `applied_date` is ignored.
 - **Points.** Each match gets a base value from a deterministic hash of its signature:
   `min + k` for a whole number `k` from 0 to `max − min`. A win adds
   `base × coef` (the winner's group coefficient) to the winner and takes the same
@@ -127,13 +128,14 @@ adjustments saved during the day.
   `js/common.js` keeps only the end entries, one per day.
 - `groups`: the normalized groups.
 
-Ratings are reset monthly: the admin panel's Monthly Reset tab saves one `rating_adjustments`
-row per player with reason `monthly_reset` for the chosen date, normally the 1st; the reset
-applies at 07:30 that day. Saving inserts the new rows first and then deletes only the
-reset rows of that date saved before them, so a failed save changes nothing and two saves
-of the same month at once never leave it without a reset. Rating changes shown on the site ("7 days", "1 day") use
-`monthDelta(series, days)` from `js/common.js`, which never reaches back before the start
-of the latest month and never measures from an adjusted entry.
+Ratings are reset monthly: the admin panel's Monthly Reset tab saves one
+`rating_adjustments` row per player with reason `monthly_reset` dated the 1st of the
+chosen month; the reset applies at 07:30 that day. Saving inserts the new rows first and
+then deletes only the reset rows of that date saved before them, so a failed save changes
+nothing and two saves of the same month at once never leave it without a reset. Rating
+changes shown on the site ("7 days", "1 day") use `monthDelta(series, days)` from
+`js/common.js`, which never reaches back before the start of the latest month and never
+measures from an adjusted entry.
 
 ### Public page ratings
 
@@ -211,7 +213,7 @@ player is added but is not read. Storage buckets (both public): `player-avatars`
   exactly one role. A user without a role can sign in to Supabase but cannot read or
   change anything the public cannot.
 - The database enforces every rule, with RLS policies and triggers. On the site tables,
-  `admin_log` and the two buckets every write must pass a permissive and a restrictive
+  `admin_log` and the two buckets, every write must pass a permissive and a restrictive
   policy, so an old "allow all" policy cannot open them again. The admin panel only hides
   what the role cannot use.
 - The esb-sync function uses the service role key, which bypasses RLS. The admin-users
@@ -377,9 +379,13 @@ Both pages aim at WCAG 2.1 AA:
   inside (the page behind it is `inert`) and Escape closes it, as well as the hover card,
   the chart tip and badge names. In the admin panel the photo and icon uploads, the badge
   picker (Escape closes it and returns focus), the switches and the colour pickers are
-  keyboard reachable, and keyboard focus always shows a 2px accent outline.
-- Controls have names that say which player, user, role or date they act on; tabs expose
-  `aria-current`, disclosures `aria-expanded`, the "vs" pick `aria-pressed`.
+  keyboard reachable, and keyboard focus is always visible: most buttons, the switches,
+  uploads and colour swatches show a 2px accent outline, and the other controls an accent
+  border or the browser's own focus ring.
+- Most repeated controls have names that say which player, user, role or date they act on
+  (not yet the Edit and Delete buttons and edit forms of role and achievement cards, or a
+  user's Save role and password buttons); tabs expose `aria-current`, disclosures
+  `aria-expanded`, the "vs" pick `aria-pressed`.
 - Screen readers hear status changes: search results, compare picks, refreshes, saves,
   form errors and load failures (`role="status"`, and `role="alert"` for login errors).
 - Text reaches 4.5:1 and field borders 3:1 against the page and card backgrounds. The
