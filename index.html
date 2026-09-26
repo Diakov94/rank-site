@@ -12,6 +12,8 @@
   <link rel="stylesheet" href="./css/styles.css" />
 </head>
 <body>
+<div class="alpha-strip" role="note"><strong>ALPHA PRODUCT</strong> <span>Not a final product — ratings, data and features may change.</span></div>
+
 <!-- Loading overlay -->
 <div id="loadingOverlay" class="loading-overlay">
   <div class="loading-box">
@@ -75,7 +77,7 @@
 
 <main class="container grid">
   <!-- Leaderboard -->
-  <section class="card">
+  <section class="card leaderboardCard">
     <h2>Leaderboard</h2>
     <div class="tableWrap">
       <table id="leaderboard">
@@ -92,7 +94,7 @@
   </section>
 
   <!-- Player profile -->
-  <section class="card">
+  <section class="card profileCard">
     <div class="card-head">
       <h2 id="profileTitle">Select a player</h2>
       <div id="periodSwitch" class="dateRange">
@@ -103,9 +105,15 @@
     </div>
 
     <div class="stats">
-      <div class="stat">
+      <div class="stat" title="Rating at the end of the previous work day (work days run 07:30–07:30 Kyiv time)">
         <span>Current rating</span>
         <strong id="currentRating">—</strong>
+        <small id="currentRatingNote" class="stat-note">—</small>
+      </div>
+      <div id="liveStat" class="stat stat-live" title="Latest rating, including the current work day's results">
+        <span><i class="live-dot" aria-hidden="true"></i>Live rating</span>
+        <strong id="liveRating">—</strong>
+        <small id="liveRatingNote" class="stat-note">—</small>
       </div>
     </div>
 

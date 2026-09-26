@@ -1,8 +1,8 @@
 /* ============================================================
  * ESportsBattle Rank — Rating Engine
  * Fetches data from Supabase, calculates ratings.
- * Uses SUPABASE, sbHeaders, safeColor, numberOrNaN, groupForRating, compareRanking and
- * localIsoDate from common.js.
+ * Uses SUPABASE, sbHeaders, safeColor, numberOrNaN, groupForRating, compareRanking,
+ * workDayOf, workDayOffset and adjustmentMoment from common.js.
  * ============================================================ */
 "use strict";
 
@@ -76,16 +76,27 @@ function round2(v) {
 
 /*
  * computeRatings()
- * Days are the sorted union of match dates and adjustment dates. For each day: apply that
- * day's adjustments (in the given order, last one wins per player), play that day's matches
- * in source-row order, then snapshot every rated player.
+ * Days are work days (07:30 -> 07:30 Kyiv, see common.js): the sorted union of match dates
+ * and adjustment dates. Every adjustment sets an absolute rating. For each day:
+ *   1. start-of-day adjustments (adjustmentMoment(a) is null: a monthly_reset, a row
+ *      without created_at, or one saved on another work day than its applied_date) apply
+ *      in the given order, last one wins per player;
+ *   2. the day's matches play in source-row order. A moment adjustment (saved during its own
+ *      work day) applies right before the first match whose time is at or after the moment
+ *      it was saved, or after the day's last match if there is none; a match without a time
+ *      never triggers one. Several apply in (moment, given) order;
+ *   3. every rated player is snapshotted.
  * Returns:
  *   leaderboard: [ { rank, nickname, rating, group } ]
  *   history: { nickname: entries[] } (null-prototype object; every player_config nickname)
- *     end of day:   { date, rating, games }
- *     start of day: { date, rating, start: true, reset }, right before the end entry, only
- *                   on days the player's rating was set by an adjustment (rating = value
- *                   after the adjustments; reset = one of them was a monthly_reset)
+ *     Per processed day, in this order:
+ *     start of day: { date, rating, start: true, reset }, only on days the player's rating
+ *                   was set by a start-of-day adjustment (rating = value after them;
+ *                   reset = one of them was a monthly_reset)
+ *     adjusted:     { date, rating, adjusted: true, from, time }, one per moment adjustment
+ *                   of the player (rating = value set, from = rating just before it or
+ *                   null, time = "HH:MM" Kyiv)
+ *     end of day:   { date, rating, games }, always last
  *   groups: normalized rating groups (see normalizeGroups)
  * options.applyUntil ("YYYY-MM-DD"): adjustments dated after it are not applied yet, so a
  * reset saved ahead of time waits for its month. Omit it to apply every adjustment.
@@ -131,7 +142,8 @@ function computeRatings(matches, players, adjustments, settingsMap, groups, opti
   });
   const coefFor = (nickname) => groupForRating(current.get(nickname), ratingGroups).coef;
 
-  /* Adjustments index: date -> [ { nickname, rating, reset } ] in fetched order */
+  /* Adjustments index: date -> { starts, moments }. starts: [ { nickname, rating, reset } ]
+   * in fetched order; moments: [ { nickname, rating, offset, time } ] by (offset, fetched order). */
   const adjByDate = new Map();
   adjustments.forEach((a) => {
     const rating = numberOrNaN(a.new_rating);
@@ -139,9 +151,13 @@ function computeRatings(matches, players, adjustments, settingsMap, groups, opti
     if (typeof a.applied_date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(a.applied_date)) return;
     if (applyUntil && a.applied_date > applyUntil) return;
     if (!Number.isFinite(rating)) return;
-    if (!adjByDate.has(a.applied_date)) adjByDate.set(a.applied_date, []);
-    adjByDate.get(a.applied_date).push({ nickname: a.nickname, rating, reset: a.reason === "monthly_reset" });
+    if (!adjByDate.has(a.applied_date)) adjByDate.set(a.applied_date, { starts: [], moments: [] });
+    const day = adjByDate.get(a.applied_date);
+    const moment = adjustmentMoment(a);
+    if (moment) day.moments.push({ nickname: a.nickname, rating, offset: moment.offset, time: moment.time });
+    else day.starts.push({ nickname: a.nickname, rating, reset: a.reason === "monthly_reset" });
   });
+  adjByDate.forEach((day) => day.moments.sort((x, y) => x.offset - y.offset)); // stable
 
   /* Matches index: date -> matches in source-row order */
   const matchesByDate = new Map();
@@ -203,16 +219,37 @@ function computeRatings(matches, players, adjustments, settingsMap, groups, opti
   const days = [...new Set([...matchesByDate.keys(), ...adjByDate.keys()])].sort();
 
   for (const date of days) {
-    /* 1. Adjustments that take effect on this date (start of day) */
-    const starts = new Map(); // nickname -> { rating, reset } after the day's adjustments
-    for (const a of adjByDate.get(date) ?? []) {
+    const dayAdj = adjByDate.get(date) ?? { starts: [], moments: [] };
+
+    /* 1. Adjustments that take effect at the start of this work day */
+    const starts = new Map(); // nickname -> { rating, reset } after the day's start adjustments
+    for (const a of dayAdj.starts) {
       current.set(a.nickname, a.rating);
       starts.set(a.nickname, { rating: a.rating, reset: a.reset || Boolean(starts.get(a.nickname)?.reset) });
     }
 
+    /* Moment adjustments, applied during the day: nickname -> adjusted entries */
+    const adjusted = new Map();
+    let nextMoment = 0;
+    const applyMomentsUntil = (offset) => {
+      while (nextMoment < dayAdj.moments.length && dayAdj.moments[nextMoment].offset <= offset) {
+        const a = dayAdj.moments[nextMoment++];
+        const from = current.has(a.nickname) ? round2(current.get(a.nickname)) : null;
+        current.set(a.nickname, a.rating);
+        if (!adjusted.has(a.nickname)) adjusted.set(a.nickname, []);
+        adjusted.get(a.nickname).push({ date, rating: round2(a.rating), adjusted: true, from, time: a.time });
+      }
+    };
+
     /* 2. The day's matches, in source-row order */
     const games = new Map(); // nickname -> matches counted today
     for (const m of matchesByDate.get(date) ?? []) {
+      /* Moment adjustments saved at or before this match's time (an untimed match never triggers one) */
+      if (nextMoment < dayAdj.moments.length) {
+        const offset = workDayOffset(m.time);
+        if (offset !== null) applyMomentsUntil(offset);
+      }
+
       /* Only rated players participate. */
       if (!current.has(m.player1) || !current.has(m.player2)) continue;
 
@@ -223,12 +260,14 @@ function computeRatings(matches, players, adjustments, settingsMap, groups, opti
       games.set(m.player1, (games.get(m.player1) ?? 0) + 1);
       games.set(m.player2, (games.get(m.player2) ?? 0) + 1);
     }
+    applyMomentsUntil(Infinity); // saved after the day's last match
 
-    /* 3. Snapshot every rated player */
+    /* 3. Snapshot every rated player: start, adjusted..., end */
     current.forEach((rating, nick) => {
       const series = history[nick];
       const start = starts.get(nick);
       if (start) series.push({ date, rating: round2(start.rating), start: true, reset: start.reset });
+      for (const entry of adjusted.get(nick) ?? []) series.push(entry);
       series.push({ date, rating: round2(rating), games: games.get(nick) ?? 0 });
     });
   }
@@ -252,9 +291,10 @@ function computeRatings(matches, players, adjustments, settingsMap, groups, opti
 async function buildRatings() {
   const { matches, players, adjustments, settingsMap, groups } =
     await loadEngineData();
-  /* Apply adjustments up to today (or the last match day, if the sheet is ahead of the clock). */
+  /* Apply adjustments up to the current work day (or the last match day, if the sheet is
+   * ahead of the clock). */
   const lastMatchDate = matches.length ? matches[matches.length - 1].date : "";
-  const today = localIsoDate();
-  const applyUntil = lastMatchDate > today ? lastMatchDate : today;
+  const workDay = workDayOf();
+  const applyUntil = lastMatchDate > workDay ? lastMatchDate : workDay;
   return computeRatings(matches, players, adjustments, settingsMap, groups, { applyUntil });
 }

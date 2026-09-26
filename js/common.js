@@ -106,6 +106,59 @@ function shiftIsoDate(iso, days) {
   return d.toISOString().slice(0, 10);
 }
 
+/* ================== WORK DAY (Kyiv) ==================
+ * The firm's work day runs from 07:30 to 07:30 the next morning, Kyiv time. The match
+ * sheets already date every row by its work day: rows after midnight keep the previous
+ * date, and within a date the rows run in time order from 07:30. */
+const WORKDAY_START_SECONDS = (7 * 60 + 30) * 60;
+/* Browsers with time-zone data from before 2022 only know the old name "Europe/Kiev"
+ * (same zone); without the fallback they would throw here and stop the whole site. */
+const KYIV_CLOCK = (() => {
+  const options = {
+    hourCycle: "h23", year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+  };
+  try {
+    return new Intl.DateTimeFormat("en-CA", { ...options, timeZone: "Europe/Kyiv" });
+  } catch {
+    return new Intl.DateTimeFormat("en-CA", { ...options, timeZone: "Europe/Kiev" });
+  }
+})();
+const WORK_TIMEZONE = KYIV_CLOCK.resolvedOptions().timeZone;
+
+/* Kyiv wall clock of an instant: { date: "YYYY-MM-DD", time: "HH:MM:SS" }. */
+function kyivWallClock(instant = new Date()) {
+  const p = {};
+  for (const part of KYIV_CLOCK.formatToParts(instant)) p[part.type] = part.value;
+  return { date: `${p.year}-${p.month}-${p.day}`, time: `${p.hour}:${p.minute}:${p.second}` };
+}
+
+/* Seconds since the start of the work day (07:30) for a "H:MM" or "H:MM:SS" time, or null. */
+function workDayOffset(time) {
+  const m = /^(\d{1,2}):(\d{2})(?::(\d{2}))?/.exec(String(time ?? "").trim());
+  if (!m) return null;
+  const seconds = Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3] ?? 0);
+  return (seconds - WORKDAY_START_SECONDS + 86400) % 86400;
+}
+
+/* The work day an instant belongs to: a Kyiv time before 07:30 is still the previous day's. */
+function workDayOf(instant = new Date()) {
+  const { date, time } = kyivWallClock(instant);
+  return workDayOffset(time) >= 86400 - WORKDAY_START_SECONDS ? shiftIsoDate(date, -1) : date;
+}
+
+/* When a rating_adjustments row takes effect within its work day (applied_date). A monthly
+ * reset, or a row dated another work day than the one it was saved on (backdated), applies
+ * at the start of that work day: null. Otherwise it applies at the moment it was saved
+ * (created_at): { offset: seconds since 07:30, time: "HH:MM" Kyiv time }. */
+function adjustmentMoment(a) {
+  if (!a || a.reason === "monthly_reset" || !a.created_at) return null;
+  const saved = new Date(a.created_at);
+  if (Number.isNaN(saved.getTime()) || workDayOf(saved) !== a.applied_date) return null;
+  const { time } = kyivWallClock(saved);
+  return { offset: workDayOffset(time), time: time.slice(0, 5) };
+}
+
 /* ================== RATING HELPERS ================== */
 /* Leaderboard order for { nick, rating } rows: rating descending, then nickname in
  * Russian collation. The engine and the public page's history ranks both use it. */
@@ -115,9 +168,9 @@ function compareRanking(a, b) {
   return (b.rating ?? -Infinity) - (a.rating ?? -Infinity) || compareNicks(a.nick, b.nick);
 }
 
-/* A history series without its start-of-day entries: one entry per day. */
+/* A history series without its start-of-day and adjustment entries: one entry per day. */
 function endEntries(series) {
-  return series.filter((e) => !e.start);
+  return series.filter((e) => !e.start && !e.adjusted);
 }
 
 /* Groups are sorted by `min` descending (see normalizeGroups in engine.js). */
@@ -136,7 +189,7 @@ function monthDelta(series, days) {
   if (!series || series.length < 2) return null;
   const last = series[series.length - 1];
   const monthStart = `${last.date.slice(0, 7)}-01`;
-  const month = series.filter((p) => p.date >= monthStart);
+  const month = series.filter((p) => p.date >= monthStart && !p.adjusted); // a mid-day set is not a base
   if (month.length < 2) return null;
 
   const target = shiftIsoDate(last.date, -days);

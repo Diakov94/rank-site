@@ -21,8 +21,8 @@ const { site } = freshSite();
 const { parseCsv, parseIndexSheet } = site;
 
 const HEADER = '"Date","Tournament","Time","Team1","Team2","Player1","Player2","Score1","","Score2"';
-function row(date, p1, p2, s1, s2, tournament = "Cup") {
-  return [date, tournament, "12:00", "T1", "T2", p1, p2, s1, "", s2]
+function row(date, p1, p2, s1, s2, tournament = "Cup", time = "12:00") {
+  return [date, tournament, time, "T1", "T2", p1, p2, s1, "", s2]
     .map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",");
 }
 const csv = (...rows) => [HEADER, ...rows].join("\n");
@@ -66,8 +66,8 @@ test("parseMonthCsv skips the header and keeps worksheet row numbers and signatu
   const { site } = freshSite();
   const text = [row("01.01.2026", "H1", "H2", 1, 0), row("5.1.2026", "A", "B", 3, 1), row("06.01.2026", "C", "D", 2, 2)].join("\n");
   assert.deepEqual(plain(site.parseMonthCsv(text)), [
-    { date: "2026-01-05", player1: "A", player2: "B", score1: 3, score2: 1, rowIndex: 2, signature: "2026-01-05|#2|A|B|3|1" },
-    { date: "2026-01-06", player1: "C", player2: "D", score1: 2, score2: 2, rowIndex: 3, signature: "2026-01-06|#3|C|D|2|2" },
+    { date: "2026-01-05", time: "12:00:00", player1: "A", player2: "B", score1: 3, score2: 1, rowIndex: 2, signature: "2026-01-05|#2|A|B|3|1" },
+    { date: "2026-01-06", time: "12:00:00", player1: "C", player2: "D", score1: 2, score2: 2, rowIndex: 3, signature: "2026-01-06|#3|C|D|2|2" },
   ]);
 });
 
@@ -124,9 +124,35 @@ test("parseMonthCsv skips short rows and rows without players or scores", () => 
     row("05.01.2026", " A ", " B ", " 2 ", " 1 "),
   );
   assert.deepEqual(plain(site.parseMonthCsv(text)), [
-    { date: "2026-01-05", player1: "A", player2: "B", score1: 2, score2: 1, rowIndex: 8, signature: "2026-01-05|#8|A|B|2|1" },
+    { date: "2026-01-05", time: "12:00:00", player1: "A", player2: "B", score1: 2, score2: 1, rowIndex: 8, signature: "2026-01-05|#8|A|B|2|1" },
   ]);
   assert.deepEqual(plain(site.parseMonthCsv("")), []);
+});
+
+test("parseMonthCsv reads column C as a zero-padded HH:MM:SS time, or null", () => {
+  const { site } = freshSite();
+  const cases = [
+    ["7:30:00", "07:30:00"], ["13:45:00", "13:45:00"], ["7:30", "07:30:00"], ["07:05", "07:05:00"],
+    [" 0:00:00 ", "00:00:00"], ["23:59:59", "23:59:59"], ["7:29:59", "07:29:59"],
+    ["", null], ["abc", null], ["24:00", null], ["12:60", null], ["12:00:60", null], ["7:3", null],
+    ["123:00", null], ["12:00:00 PM", null], ["12.00", null], ["12:00:00.5", null],
+  ];
+  const text = csv(...cases.map(([raw], i) => row("05.01.2026", `P${i}`, "B", 1, 0, "Cup", raw)));
+  const matches = plain(site.parseMonthCsv(text));
+  assert.equal(matches.length, cases.length, "a row without a usable time is still a match");
+  cases.forEach(([raw, expected], i) => assert.equal(matches[i].time, expected, JSON.stringify(raw)));
+});
+
+test("parseMonthCsv: the time does not change the date, row number or signature", () => {
+  const { site } = freshSite();
+  const [early, late, none] = plain(site.parseMonthCsv(csv(
+    row("05.01.2026", "A", "B", 1, 0, "Cup", "8:00:00"),
+    row("05.01.2026", "A", "B", 1, 0, "Cup", "1:15:00"), // after midnight: still the 5th's work day
+    row("05.01.2026", "A", "B", 1, 0, "Cup", "later"),
+  )));
+  assert.deepEqual([early.date, early.rowIndex, early.signature], ["2026-01-05", 2, "2026-01-05|#2|A|B|1|0"]);
+  assert.deepEqual([late.date, late.time, late.signature], ["2026-01-05", "01:15:00", "2026-01-05|#3|A|B|1|0"]);
+  assert.deepEqual([none.time, none.signature], [null, "2026-01-05|#4|A|B|1|0"]);
 });
 
 /* ================== parseIndexSheet ================== */

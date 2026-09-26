@@ -4,7 +4,7 @@ const assert = require("node:assert/strict");
 const { loadSite, plain, silentConsole } = require("./helpers/load.js");
 
 const site = loadSite({ console: silentConsole });
-const { computeRatings, normalizeGroups, groupForRating, monthDelta } = site;
+const { computeRatings, normalizeGroups, groupForRating, monthDelta, endEntries } = site;
 
 /* Pro: coef 1 from 1100, Mid: coef 1.5 from 1000, Rookie: coef 2 below. */
 const GROUPS = [
@@ -34,6 +34,31 @@ function ratingsOf(result) {
 const seriesOf = (result, nick) => plain(result.history[nick]);
 const end = (date, rating, games) => ({ date, rating, games });
 const start = (date, rating, reset) => ({ date, rating, start: true, reset });
+const adjusted = (date, rating, from, time) => ({ date, rating, adjusted: true, from, time });
+/* A match with a Kyiv time ("HH:MM:SS"), as parseMonthCsv returns it. */
+const at = (time, m) => ({ ...m, time });
+/* A rating_adjustments row saved at `created_at` (the DB's timestamptz). */
+function saved(created_at, applied_date, nickname, new_rating, reason = "manual", id = undefined) {
+  return { ...adj(applied_date, nickname, new_rating, reason, id), created_at };
+}
+
+/* Checks the history contract: per day, an optional start entry, then adjusted entries,
+ * then exactly one end entry; dates ascending; the series ends with an end entry. */
+function assertContract(series, label) {
+  const kind = (e) => (e.start ? "start" : e.adjusted ? "adjusted" : "end");
+  const keys = { start: ["date", "rating", "start", "reset"], adjusted: ["date", "rating", "adjusted", "from", "time"], end: ["date", "rating", "games"] };
+  assert.deepEqual(series.map((e) => e.date), [...series.map((e) => e.date)].sort(), label);
+  if (series.length) assert.equal(kind(series.at(-1)), "end", `${label}: last entry is an end entry`);
+  const byDay = new Map();
+  for (const e of series) {
+    assert.deepEqual(Object.keys(e), keys[kind(e)], `${label} ${e.date}`);
+    if (!byDay.has(e.date)) byDay.set(e.date, []);
+    byDay.get(e.date).push(kind(e));
+  }
+  for (const [date, kinds] of byDay) {
+    assert.match(kinds.join(","), /^(start,)?(adjusted,)*end$/, `${label} ${date}`);
+  }
+}
 
 /* ================== E1: days = union of match and adjustment dates ================== */
 test("an adjustment on a day without matches takes effect (monthly reset on the 1st)", () => {
@@ -256,6 +281,146 @@ test("start entries give monthDelta the rating right after the monthly reset", (
   const a = r.history.A;
   assert.equal(a.at(-1).rating, 1018);
   assert.equal(monthDelta(a, 7), 18); // includes the whole first day of the month
+  assert.equal(monthDelta(a, 1), 3);
+});
+
+/* ================== Moment adjustments (saved during their own work day) ================== */
+test("a mid-day manual adjustment splits the day: earlier matches use the old rating, later ones the new value", () => {
+  const r = run({
+    players: roster({ A: 1000, B: 1000, C: 1000 }),
+    matches: [
+      at("10:00:00", match("2026-09-24", "A", "B", 1, 0)),
+      at("09:00:00", match("2026-09-25", "A", "C", 1, 0)),
+      at("15:04:29", match("2026-09-25", "A", "B", 1, 0)), // one second before the adjustment
+      at("15:04:30", match("2026-09-25", "A", "C", 1, 0)), // at the adjustment's moment: after it
+    ],
+    // Saved at 15:04:30 Kyiv (UTC+3) on the 25th's work day.
+    adjustments: [saved("2026-09-25T12:04:30.123456+00:00", "2026-09-25", "A", 1200, "correction", 1)],
+  });
+  // A: 1000 (Mid, x1.5) +4.5, +4.5 = 1013.5; set to 1200 (Pro, x1) +3 = 1203.
+  assert.deepEqual(ratingsOf(r), { A: 1203, C: 992.5, B: 991 });
+  assert.deepEqual(seriesOf(r, "A"), [
+    end("2026-09-24", 1004.5, 1),
+    adjusted("2026-09-25", 1200, 1013.5, "15:04"),
+    end("2026-09-25", 1203, 3),
+  ]);
+  assert.deepEqual(seriesOf(r, "B"), [end("2026-09-24", 995.5, 1), end("2026-09-25", 991, 1)]);
+  assert.deepEqual(seriesOf(r, "C"), [end("2026-09-24", 1000, 0), end("2026-09-25", 992.5, 2)]);
+  for (const nick of ["A", "B", "C"]) assertContract(seriesOf(r, nick), nick);
+});
+
+test("a moment adjustment saved after the day's last match applies at the end of the day; untimed matches never trigger one", () => {
+  const r = run({
+    groups: FLAT,
+    players: roster({ A: 1000, B: 1000 }),
+    matches: [at("10:00:00", match("2026-09-25", "A", "B", 1, 0)), match("2026-09-25", "A", "B", 1, 0)], // 2nd: no time
+    adjustments: [saved("2026-09-25T08:00:00Z", "2026-09-25", "A", 900)], // 11:00 Kyiv
+  });
+  assert.deepEqual(seriesOf(r, "A"), [adjusted("2026-09-25", 900, 1006, "11:00"), end("2026-09-25", 900, 2)]);
+  assert.deepEqual(ratingsOf(r), { B: 994, A: 900 });
+});
+
+test("several moment adjustments apply in (moment, fetched) order, including after midnight", () => {
+  const r = run({
+    groups: FLAT,
+    players: roster({ A: 1000, B: 1000 }),
+    matches: [
+      at("11:00:00", match("2026-09-25", "A", "B", 1, 0)),
+      at("13:00:00", match("2026-09-25", "A", "B", 1, 0)),
+      at("01:00:00", match("2026-09-25", "A", "B", 1, 0)), // 01:00 on the 26th: still the 25th's work day
+    ],
+    adjustments: [
+      saved("2026-09-25T20:30:00Z", "2026-09-25", "A", 1200, "manual", 1), // 23:30 Kyiv
+      saved("2026-09-25T09:00:00Z", "2026-09-25", "A", 900, "manual", 2),  // 12:00 Kyiv
+      saved("2026-09-25T09:00:00Z", "2026-09-25", "A", 950, "manual", 3),  // 12:00 Kyiv, fetched later
+    ],
+  });
+  assert.deepEqual(seriesOf(r, "A"), [
+    adjusted("2026-09-25", 900, 1003, "12:00"),
+    adjusted("2026-09-25", 950, 900, "12:00"),
+    adjusted("2026-09-25", 1200, 953, "23:30"),
+    end("2026-09-25", 1203, 3),
+  ]);
+  assert.deepEqual(seriesOf(r, "B"), [end("2026-09-25", 991, 3)]);
+});
+
+test("a backdated manual adjustment and a monthly reset apply at the start of their day", () => {
+  const r = run({
+    players: roster({ A: 1000, B: 1000 }),
+    matches: [at("10:00:00", match("2026-09-20", "A", "B", 1, 0)), at("08:00:00", match("2026-10-01", "A", "B", 1, 0))],
+    adjustments: [
+      saved("2026-09-25T12:00:00Z", "2026-09-20", "A", 1100, "correction", 1), // saved five days later
+      saved("2026-10-01T09:00:00Z", "2026-10-01", "A", 1000, "monthly_reset", 2), // saved at 12:00 that day
+      saved("2026-10-01T09:00:00Z", "2026-10-01", "B", 1000, "monthly_reset", 3),
+    ],
+  });
+  assert.deepEqual(seriesOf(r, "A"), [
+    start("2026-09-20", 1100, false), end("2026-09-20", 1103, 1), // played at 1100 (Pro, x1)
+    start("2026-10-01", 1000, true), end("2026-10-01", 1004.5, 1), // the 08:00 match is after the reset
+  ]);
+  // The same rows without created_at give the same result.
+  const undated = run({
+    players: roster({ A: 1000, B: 1000 }),
+    matches: [at("10:00:00", match("2026-09-20", "A", "B", 1, 0, 50)), at("08:00:00", match("2026-10-01", "A", "B", 1, 0, 51))],
+    adjustments: [adj("2026-09-20", "A", 1100, "correction", 1), adj("2026-10-01", "A", 1000, "monthly_reset", 2), adj("2026-10-01", "B", 1000, "monthly_reset", 3)],
+  });
+  assert.deepEqual(seriesOf(undated, "A"), seriesOf(r, "A"));
+});
+
+test("a day with only moment adjustments is processed; a player can join through one mid-day", () => {
+  const r = run({
+    players: [...roster({ A: 1000 }), { nickname: "N", initial_rating: null }],
+    matches: [at("10:00:00", match("2026-09-25", "N", "A", 1, 0)), at("16:00:00", match("2026-09-25", "N", "A", 1, 0))],
+    adjustments: [
+      saved("2026-09-24T12:00:00Z", "2026-09-24", "A", 1050), // no matches that day
+      saved("2026-09-25T12:00:00Z", "2026-09-25", "N", 1000), // 15:00: N joins between the two matches
+    ],
+  });
+  assert.deepEqual(seriesOf(r, "A"), [adjusted("2026-09-24", 1050, 1000, "15:00"), end("2026-09-24", 1050, 0), end("2026-09-25", 1045.5, 1)]);
+  assert.deepEqual(seriesOf(r, "N"), [adjusted("2026-09-25", 1000, null, "15:00"), end("2026-09-25", 1004.5, 1)]);
+});
+
+test("history entries follow the start / adjusted / end contract", () => {
+  const r = run({
+    players: roster({ A: 1000, B: 1000, C: 1000 }),
+    matches: [
+      at("20:00:00", match("2026-08-31", "A", "B", 1, 0)),
+      at("08:00:00", match("2026-09-01", "A", "B", 1, 0)), at("14:00:00", match("2026-09-01", "A", "C", 1, 1)),
+      at("09:00:00", match("2026-09-02", "B", "C", 0, 1)),
+    ],
+    adjustments: [
+      ...["A", "B", "C"].map((n, i) => saved("2026-08-31T20:00:00Z", "2026-09-01", n, 1000, "monthly_reset", i + 1)),
+      saved("2026-09-01T10:00:00Z", "2026-09-01", "A", 1150, "bonus", 4),  // 13:00
+      saved("2026-09-01T18:00:00Z", "2026-09-01", "A", 1160, "bonus", 5),  // 21:00, after the last match
+      saved("2026-09-02T15:00:00Z", "2026-09-02", "B", 980, null, 6),      // 18:00
+    ],
+  });
+  for (const nick of ["A", "B", "C"]) assertContract(seriesOf(r, nick), nick);
+  assert.deepEqual(seriesOf(r, "A").filter((e) => e.date === "2026-09-01"), [
+    start("2026-09-01", 1000, true),
+    adjusted("2026-09-01", 1150, 1004.5, "13:00"),
+    adjusted("2026-09-01", 1160, 1150.67, "21:00"), // after a Pro-Mid draw: +1/1.5
+    end("2026-09-01", 1160, 2),
+  ]);
+  // endEntries keeps one entry per processed day.
+  assert.deepEqual(plain(endEntries(r.history.B)).map((e) => e.date), ["2026-08-31", "2026-09-01", "2026-09-02"]);
+});
+
+test("endEntries and monthDelta ignore adjusted entries in the engine's history", () => {
+  const r = run({
+    groups: FLAT,
+    players: roster({ A: 1000, B: 1000 }),
+    matches: [
+      at("10:00:00", match("2026-08-31", "A", "B", 1, 0)),
+      at("16:00:00", match("2026-09-02", "A", "B", 1, 0)),
+      at("10:00:00", match("2026-09-03", "A", "B", 1, 0)),
+    ],
+    adjustments: [saved("2026-09-02T12:00:00Z", "2026-09-02", "A", 1200)], // 15:00, no reset this month
+  });
+  const a = r.history.A;
+  assert.deepEqual(plain(a).map((e) => e.rating), [1003, 1200, 1203, 1206]);
+  assert.deepEqual(plain(endEntries(a)), [end("2026-08-31", 1003, 1), end("2026-09-02", 1203, 1), end("2026-09-03", 1206, 1)]);
+  assert.equal(monthDelta(a, 7), 3); // base: end of 09-02, not the mid-day 1200
   assert.equal(monthDelta(a, 1), 3);
 });
 
@@ -516,12 +681,77 @@ test("buildRatings rejects when the Google Sheets index cannot be loaded", async
   await assert.rejects(s.buildRatings(), /Sheets: failed to load index: HTTP 500/);
 });
 
-test("buildRatings applies adjustments up to max(today, last match date) and holds back later ones", async () => {
+/* Replaces Date in a loadSite context so that `new Date()` and Date.now() return `iso`. */
+function freezeClock(s, iso) {
+  s.$eval(`(() => {
+    const RealDate = Date, fixed = new RealDate(${JSON.stringify(iso)}).getTime();
+    globalThis.Date = class extends RealDate {
+      constructor(...args) { super(...(args.length ? args : [fixed])); }
+      static now() { return fixed; }
+    };
+  })()`);
+}
+
+/* Runs the async fn with process.env.TZ set to tz. */
+async function inTimeZone(tz, fn) {
+  const previous = process.env.TZ;
+  process.env.TZ = tz;
+  try { return await fn(); } finally {
+    if (previous === undefined) delete process.env.TZ; else process.env.TZ = previous;
+  }
+}
+
+test("buildRatings applies adjustments up to the current work day (07:30 Kyiv), not the viewer's date", async () => {
   const tables = {
     player_config: roster({ A: 1000, B: 1000 }),
     rating_groups: GROUPS,
     rating_adjustments: [
-      adj("2099-06-01", "A", 900, "penalty", 1), // after today, before the sheet's last match: applies
+      saved("2026-09-25T10:00:00Z", "2026-09-25", "A", 900, "penalty", 1),
+      adj("2026-09-26", "B", 1500, "monthly_reset", 2),
+    ],
+  };
+  await inTimeZone("UTC", async () => {
+    // 03:00 UTC = 06:00 Kyiv on the 26th: the viewer's date is the 26th, the work day still the 25th.
+    const early = loadSite({ console: silentConsole, fetch: supabaseFetch(tables).fetch });
+    freezeClock(early, "2026-09-26T03:00:00Z");
+    assert.equal(early.localIsoDate(), "2026-09-26");
+    assert.equal(early.workDayOf(), "2026-09-25");
+    assert.deepEqual(ratingsOf(await early.buildRatings()), { B: 1000, A: 900 });
+    // 05:00 UTC = 08:00 Kyiv: the 26th's work day has started.
+    const later = loadSite({ console: silentConsole, fetch: supabaseFetch(tables).fetch });
+    freezeClock(later, "2026-09-26T05:00:00Z");
+    assert.deepEqual(ratingsOf(await later.buildRatings()), { B: 1500, A: 900 });
+  });
+});
+
+test("buildRatings: sheet times and created_at place a manual adjustment mid-day", async () => {
+  const tables = {
+    player_config: roster({ A: 1000, B: 1000 }),
+    rating_groups: GROUPS,
+    rating_adjustments: [saved("2026-06-15T12:00:00.000001+00:00", "2026-06-15", "A", 1200, "correction", 1)], // 15:00 Kyiv
+  };
+  const { fetch } = supabaseFetch(tables);
+  const csv = ['"Date","T","Time","T1","T2","P1","P2","S1","","S2"',
+    '"15.06.2026","T","10:00:00","X","Y","A","B","1","","0"',
+    '"15.06.2026","T","16:00:00","X","Y","A","B","1","","0"'].join("\n");
+  const withSheet = async (url, init) => {
+    const u = new URL(url);
+    if (u.hostname !== "docs.google.com") return fetch(url, init);
+    if (u.pathname.includes("DOC26")) return { ok: true, status: 200, text: async () => (u.searchParams.get("sheet") === "Jun26" ? csv : "") };
+    return { ok: true, status: 200, text: async () => '"","2026","https://docs.google.com/spreadsheets/d/DOC26/edit"' };
+  };
+  const result = await loadSite({ console: silentConsole, fetch: withSheet }).buildRatings();
+  // 1000 (Mid, x1.5) +4.5 at 10:00; set to 1200 at 15:00; +3 (Pro, x1) at 16:00.
+  assert.deepEqual(ratingsOf(result), { A: 1203, B: 992.5 });
+  assert.deepEqual(plain(result.history.A), [adjusted("2026-06-15", 1200, 1004.5, "15:00"), end("2026-06-15", 1203, 2)]);
+});
+
+test("buildRatings applies adjustments up to max(current work day, last match date) and holds back later ones", async () => {
+  const tables = {
+    player_config: roster({ A: 1000, B: 1000 }),
+    rating_groups: GROUPS,
+    rating_adjustments: [
+      adj("2099-06-01", "A", 900, "penalty", 1), // after the current work day, before the sheet's last match: applies
       adj("2099-07-01", "B", 1500, "monthly_reset", 2), // after both: held back
     ],
   };

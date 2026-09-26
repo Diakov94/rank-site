@@ -6,6 +6,9 @@ achievements (`admin.html`). It is plain HTML, CSS and JavaScript: no build step
 runtime dependencies and no server of its own. Match results come from Google Sheets,
 configuration comes from Supabase, and ratings are computed in the browser.
 
+The site is an **alpha** version: both pages show an "ALPHA PRODUCT" notice saying it is
+not the final product.
+
 ## How it works
 
 ```
@@ -17,20 +20,42 @@ Supabase tables (players, settings, ...) ──────────┘   (co
                           js/admin.js (admin panel) <─────────┘
 ```
 
+### Work day
+
+The firm's work day runs from 07:30 to 07:30 the next morning, Kyiv time (`Europe/Kyiv`:
+UTC+2 in winter, UTC+3 in summer). Every date in the rating data is a work day, not a
+calendar day. The match sheets already date each row by its work day: a date's block of
+rows starts at 07:30 and runs past midnight, so a match at 01:15 keeps the previous date.
+`rating_adjustments.applied_date` is a work day as well.
+
+`js/common.js` has the helpers. They format with `Intl` in the `Europe/Kyiv` time zone, so
+the viewer's own time zone never matters:
+
+- `kyivWallClock(instant)`: Kyiv date and time, `{ date: "YYYY-MM-DD", time: "HH:MM:SS" }`.
+- `workDayOffset(time)`: seconds since 07:30 for an `H:MM` or `H:MM:SS` time (`07:29:59`
+  is the work day's last second), or null.
+- `workDayOf(instant)`: the work day an instant belongs to (a Kyiv time before 07:30 still
+  belongs to the previous day). `workDayOf()` is the current work day.
+- `adjustmentMoment(row)`: when a `rating_adjustments` row takes effect (see below).
+
 ### Match results: Google Sheets (`js/sheets.js`)
 
 1. **Index doc** (`SHEETS_INDEX_ID`): one row per year, column B = year, column C = link
    to that year's doc.
 2. **Yearly doc**: one tab per month, named `Jan26`, `Feb26` … `Dec26` (month
    abbreviation plus the last two digits of the year).
-3. **Month tab**: row 1 is a header. Columns A–J are Date (`DD.MM.YYYY`), Tournament,
-   Time, Team1, Team2, Player1, Player2, Score1, (empty), Score2. Rows without both
-   players, without numeric scores or with an impossible date are skipped.
+3. **Month tab**: row 1 is a header. Columns A–J are Date (`DD.MM.YYYY`, the work day),
+   Tournament, Time (Kyiv, `H:MM` or `H:MM:SS`), Team1, Team2, Player1, Player2, Score1,
+   (empty), Score2. Rows without both players, without numeric scores or with an
+   impossible date are skipped. Each match gets `time` as `HH:MM:SS`, or null when
+   column C is not a valid time; such a row still counts as a match.
 
 Sheets are read as CSV through the `gviz/tq?tqx=out:csv` endpoint with no credentials,
 so the docs must be readable by anyone with the link. Matches are sorted by date and,
-within a day, by sheet row. The row order matters: it is the order in which the engine
-applies a day's matches, and the row number is part of the match signature used for points.
+within a day, by sheet row (which is time order). The row order matters: it is the order in
+which the engine applies a day's matches, and the row number is part of the match signature
+used for points. The time is not part of the signature; the engine uses it only to place
+adjustments saved during the day.
 
 ### Rating engine (`js/engine.js`)
 
@@ -39,14 +64,30 @@ applies a day's matches, and the row number is part of the match signature used 
 
 - Only nicknames in `player_config` take part. A player is rated from their
   `initial_rating`, or from the first adjustment that sets their rating.
-- The engine walks the days that have matches or adjustments, in date order. On each
-  day it first applies that day's `rating_adjustments` (the rating becomes
-  `new_rating` at the start of the day), then plays the day's matches in sheet order,
-  then records an entry for every rated player. A match counts only when both players
-  are rated and neither is suspended (`suspended_from`/`suspended_to`) on that day.
-  Adjustments dated after today (or after the last match day, if later) wait until
-  their date, so a monthly reset saved ahead of time does not change ratings early.
-  An adjustment without a numeric `new_rating` or a `YYYY-MM-DD` `applied_date` is ignored.
+- The engine walks the work days that have matches or adjustments, in date order. On
+  each day it applies that day's start-of-day adjustments, then plays the day's matches in
+  sheet order (applying adjustments saved during the day at their moment, see below), then
+  records entries for every rated player. A match counts only when both players are rated
+  and neither is suspended (`suspended_from`/`suspended_to`) on that day.
+- **Adjustments** (`rating_adjustments`) set an absolute rating, `new_rating`. A manual
+  adjustment is not a reset: the history before it stays, and later results build on the
+  new value. When a row takes effect depends on its `applied_date` and on `created_at`,
+  the moment the database saved it (`adjustmentMoment()` in `js/common.js`):
+  - **Dated the work day it is saved on** (an adjustment for the current work day:
+    `applied_date` is the work day of `created_at`): at the moment it was saved. It
+    applies right before the first match of that day whose time is at or after that
+    moment, or after the day's last match if there is none. Earlier matches of the day
+    keep counting with the old rating. A match without a time never triggers it. Several
+    such rows apply in the order they were saved (to the second), then by `id`.
+  - **Dated another day** (backdated, saved ahead, or without `created_at`): at 07:30 of
+    that work day, before its matches. Several apply in `id` order; the last one wins.
+  - **Monthly reset** (`reason = monthly_reset`): at 07:30 of its date (the 1st),
+    whenever it was saved.
+
+  Adjustments dated after the current work day (`workDayOf()`), or after the last match
+  day if that is later, wait until their date, so a monthly reset saved ahead of time
+  does not change ratings early. An adjustment without a numeric `new_rating` or a
+  `YYYY-MM-DD` `applied_date` is ignored.
 - **Points.** Each match gets a base value from a deterministic hash of its signature:
   `min + k` for a whole number `k` from 0 to `max − min`. A win adds
   `base × coef` (the winner's group coefficient) to the winner and takes the same
@@ -69,18 +110,35 @@ applies a day's matches, and the row number is part of the match signature used 
 - `leaderboard`: `[{ rank, nickname, rating, group }]`, highest rating first (ratings are
   rounded to 2 decimals; ties are ordered by nickname).
 - `history`: `{ [nickname]: entries[] }`, sorted by date. For every processed day each
-  rated player gets one **end-of-day** entry `{ date, rating, games }`, where `games` is
-  the number of that player's matches that counted that day. When adjustments set a
-  player's rating that day, a **start** entry `{ date, rating, start: true, reset }`
-  comes right before the end entry: `rating` is the value after the adjustments and
-  before the matches, and `reset` is true when one of them was a `monthly_reset`. The
-  last entry of a series is always an end entry.
+  rated player gets, in this order:
+  1. a **start** entry `{ date, rating, start: true, reset }`, only when start-of-day
+     adjustments set the player's rating that day: `rating` is the value after them and
+     before the matches, and `reset` is true when one of them was a `monthly_reset`;
+  2. an **adjusted** entry `{ date, rating, adjusted: true, from, time }` for each
+     adjustment of the player that applied during the day: `rating` is the value it set,
+     `from` the rating just before it (null if the player was not rated yet) and `time`
+     the Kyiv time it was saved (`HH:MM`);
+  3. one **end-of-day** entry `{ date, rating, games }`, where `games` is the number of
+     that player's matches that counted that day.
+
+  The last entry of a series is always an end entry. `endEntries(series)` in
+  `js/common.js` keeps only the end entries, one per day.
 - `groups`: the normalized groups.
 
 Ratings are reset monthly: the admin panel's Monthly Reset tab saves one `rating_adjustments`
-row per player with reason `monthly_reset` for the chosen date. Rating changes shown on
-the site ("7 days", "1 day") use `monthDelta(series, days)` from `js/common.js`, which
-never reaches back before the start of the latest month.
+row per player with reason `monthly_reset` for the chosen date, normally the 1st; the reset
+applies at 07:30 that day. Rating changes shown on the site ("7 days", "1 day") use
+`monthDelta(series, days)` from `js/common.js`, which never reaches back before the start
+of the latest month and never measures from an adjusted entry.
+
+### Public page ratings
+
+A player's profile shows two ratings:
+
+- **Current rating**: the rating at the end of the previous work day. It stays the same
+  for the whole work day.
+- **Live rating**: the latest rating, including the current work day's matches and
+  adjustments so far.
 
 ## Files
 
@@ -88,7 +146,7 @@ never reaches back before the start of the latest month.
 | --- | --- |
 | `index.html`, `css/styles.css` | Public page. |
 | `admin.html`, `css/admin.css` | Admin panel. |
-| `js/common.js` | Shared config (`SUPABASE` URL, publishable key, bucket names) and helpers: Supabase headers, avatars, escaping (`escapeHtml`, `safeUrl`, `safeColor`), dates, `groupForRating`, `monthDelta`. |
+| `js/common.js` | Shared config (`SUPABASE` URL, publishable key, bucket names) and helpers: Supabase headers, avatars, escaping (`escapeHtml`, `safeUrl`, `safeColor`), dates, the Kyiv work day (`kyivWallClock`, `workDayOffset`, `workDayOf`, `adjustmentMoment`), `groupForRating`, `endEntries`, `monthDelta`. |
 | `js/sheets.js` | Reads matches from Google Sheets. |
 | `js/engine.js` | Supabase reads (`sbFetch`, `sbFetchAll`) and the rating engine. |
 | `js/app.js` | Public page UI: leaderboard, search, profile, chart, compare, achievements. Reloads the data every 10 minutes while the tab is visible. |
@@ -110,7 +168,7 @@ top-level name must be declared in only one of the files loaded by a page.
 | Table | Columns the code uses | Read by | Written by |
 | --- | --- | --- | --- |
 | `player_config` | `nickname`, `initial_rating`, `suspended_from`, `suspended_to`, `active` | engine, admin | admin (add, delete players) |
-| `rating_adjustments` | `id`, `nickname`, `new_rating`, `applied_date`, `reason` | engine, admin | admin (Monthly Reset, Adjustments tabs) |
+| `rating_adjustments` | `id`, `nickname`, `new_rating`, `applied_date`, `reason`, `created_at` (set by the database on insert) | engine, admin | admin (Monthly Reset, Adjustments tabs) |
 | `settings` | `key` (unique), `value` | engine, admin, esb-sync (`esb_sync_cursor`) | admin (Formula tab); esb-sync (`esb_sync_cursor` row) |
 | `rating_groups` | `id`, `name`, `min_rating`, `color`, `coef` | engine, admin | admin (Groups tab edits existing rows) |
 | `hidden_players` | `nick` | public page, admin | admin |

@@ -57,9 +57,19 @@ function parseIndexSheet(csv) {
   return result;
 }
 
+/* ---- Match time (column C): "H:MM" or "H:MM:SS" -> "HH:MM:SS", else null ----
+ * Kyiv wall-clock time. Rows after midnight keep the previous work day's date, so a
+ * time before 07:30 belongs to the end of that work day (see workDayOffset in common.js). */
+function parseMatchTime(raw) {
+  const m = /^(\d{1,2}):([0-5]\d)(?::([0-5]\d))?$/.exec(String(raw ?? "").trim());
+  if (!m || Number(m[1]) > 23) return null;
+  return `${m[1].padStart(2, "0")}:${m[2]}:${m[3] ?? "00"}`;
+}
+
 /* ---- Parse one month tab CSV into match objects ---- */
 // Tab format: row 1 = header, rows 2+ = data
 // Columns A-J: Date, Tournament, Time, Team1, Team2, Player1, Player2, Score1, (empty), Score2
+// Date is the work day (07:30 -> 07:30 Kyiv), not the calendar day; rows run in time order.
 function parseMonthCsv(text, tabName = "month tab") {
   const matches = [];
   const rows    = parseCsv(text);
@@ -80,6 +90,9 @@ function parseMonthCsv(text, tabName = "month tab") {
     if (!monthDays || day < 1 || day > monthDays) { badDates++; continue; }
     const date = `${yyyy}-${mm.padStart(2,"0")}-${dd.padStart(2,"0")}`;
 
+    // C (2): time "HH:MM:SS" or null. It is not part of the signature (the points hash).
+    const time = parseMatchTime(cells[2]);
+
     // F (5): Player1, G (6): Player2
     const player1 = cells[5].trim();
     const player2 = cells[6].trim();
@@ -96,7 +109,7 @@ function parseMonthCsv(text, tabName = "month tab") {
     // to apply same-day matches and as part of the deterministic points hash.
     const rowIndex = i + 1; // 1-based worksheet row (header is row 1)
     const signature = `${date}|#${rowIndex}|${player1}|${player2}|${score1}|${score2}`;
-    matches.push({ date, player1, player2, score1, score2, rowIndex, signature });
+    matches.push({ date, time, player1, player2, score1, score2, rowIndex, signature });
   }
   if (badDates) console.warn(`Sheets: ${tabName}: skipped ${badDates} row(s) with an invalid date`);
   return matches;

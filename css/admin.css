@@ -5,8 +5,13 @@
 /* ===== Global mobile fix ===== */
 html, body { overflow-x: clip; }
 
+/* The page is a column at least one screen tall: the ALPHA strip (styles.css) comes first
+ * and the login screen fills the rest, so the strip adds no scrolling. The panel is a plain
+ * block inside it, laid out as before. */
+body { display:flex; flex-direction:column; min-height:100vh; min-height:100dvh; }
+
 /* ===== Login ===== */
-.login-screen { min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px; }
+.login-screen { flex:1 0 auto; display:flex; align-items:center; justify-content:center; padding:24px; }
 .login-card { width:100%; max-width:360px; background:var(--card-bg); border:1px solid var(--card-border); border-radius:var(--radius-lg); padding:32px; box-shadow:var(--shadow-card); animation:fadeIn 320ms var(--ease) both; }
 .login-card h2 { margin:0 0 4px; font-size:22px; }
 .field { margin-bottom:16px; }
@@ -24,6 +29,7 @@ html, body { overflow-x: clip; }
 .admin-header { padding:16px 0; border-bottom:1px solid rgba(255,255,255,0.08); position:sticky; top:0; z-index:50; backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px); background:rgba(11,15,20,0.6); }
 .admin-header-row { display:flex; align-items:center; justify-content:space-between; gap:16px; flex-wrap:wrap; }
 .admin-title { margin:0; font-size:20px; }
+.admin-header-actions { display:flex; gap:8px; align-items:center; }
 
 /* ===== Tabs ===== */
 .admin-tabs {
@@ -203,3 +209,97 @@ html, body { overflow-x: clip; }
 
 /* Shared field label */
 .tg-label { display:block; font-size:12px; opacity:0.7; margin-bottom:6px; text-transform:uppercase; letter-spacing:0.04em; }
+
+/* ===== Inline forms (Add player, Adjustments, Monthly Reset selectors) ===== */
+.admin-form { display:flex; gap:10px; align-items:flex-end; flex-wrap:wrap; margin-bottom:16px; padding:14px; background:rgba(255,255,255,0.04); border-radius:10px; }
+.admin-form--roomy { margin-bottom:20px; padding:16px; }
+.admin-form .field, .reset-controls .field { margin:0; }
+.admin-form-grow { flex:1; min-width:140px; }
+.admin-input { background:#1a2030; border:1px solid rgba(255,255,255,0.12); color:#fff; padding:6px 10px; border-radius:6px; font-size:13px; }
+.admin-input--nick { width:150px; }
+.admin-input--rating { width:140px; } /* the whole "Enter rating" placeholder fits beside the spin arrows */
+.admin-input--adj-rating { width:110px; }
+.admin-input--player { min-width:140px; }
+.admin-input--year { min-width:90px; }
+.admin-input--month { min-width:130px; }
+.admin-input--full { width:100%; }
+.reset-controls { display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin-bottom:20px; }
+.reset-controls-offset { margin-top:18px; } /* lines the button up with the selects under their labels */
+.formula-bar { align-items:flex-end; }
+
+/* ============================================================
+ * Tablet and phone. Everything below applies under 1100px only;
+ * the desktop layout above is unchanged. Same breakpoints as the
+ * public page (styles.css): phone < 768px, tablet 768-1099px.
+ * ============================================================ */
+@media (max-width: 1099.98px) {
+  /* Tables scroll sideways inside their own box, not the page */
+  .log-wrap, .adj-table-wrap { overflow-x:auto; overflow-y:hidden; -webkit-overflow-scrolling:touch; }
+
+  /* Long names, file names and error text shorten or wrap instead of widening a row */
+  .player-row { flex-wrap:wrap; }
+  .player-row-info > div { min-width:0; }
+  .ach-card-name, .load-error, .ach-picker-item span { overflow-wrap:anywhere; }
+  .ach-picker-item span { min-width:0; }
+  #achIconName, .ach-edit-filename { min-width:0; overflow-wrap:anywhere; }
+
+  /* Touch-sized row actions */
+  .upload-btn, .trophy-btn { width:40px; height:40px; }
+  .toggle { min-height:40px; }
+  .delete-player-btn, .adj-del-btn { min-width:40px; min-height:40px; }
+}
+
+@media (max-width: 767.98px) {
+  /* Header: title, then the links wrap below it when they do not fit */
+  .admin-header { padding:10px 0; }
+  .admin-header-row { gap:8px 12px; }
+  .admin-title { font-size:18px; }
+  .admin-header-actions { flex-wrap:wrap; }
+  .admin-header-actions .btn { display:inline-flex; align-items:center; }
+  .admin-tabs { margin-top:10px; }
+  .admin-tab { min-height:40px; padding:9px 14px; }
+  #panelSection .btn { min-height:40px; }
+
+  /* Forms stack, with full-width fields and buttons */
+  .admin-form, .reset-controls, .formula-bar { flex-direction:column; align-items:stretch; }
+  .admin-form > *, .reset-controls > *, .formula-bar > * { width:100%; min-width:0; flex:none; }
+  .admin-form .admin-input, .reset-controls .admin-input, .formula-bar input { display:block; width:100%; min-width:0; min-height:40px; }
+  .reset-controls-offset { margin-top:0; }
+  .formula-bar .field { margin:0; }
+  /* 16px text keeps iOS from zooming into a field on focus */
+  .admin-input, .formula-bar input, .field input[type=password], .field input[type=email] { font-size:16px; }
+
+  /* Player and reset rows: the actions go on their own line below the name */
+  .player-row { gap:8px 12px; }
+  .player-row-info { flex:1 1 100%; }
+  .row-actions { flex:1 1 100%; flex-wrap:wrap; }
+  .delete-player-btn { margin-left:auto; }
+
+  /* Group rows: colour + name, then one labelled field per line, then Save */
+  .group-row { display:grid; grid-template-columns:auto minmax(0, 1fr); gap:8px 10px; }
+  .group-name-input, .group-min-input { width:100%; min-width:0; }
+  .group-save-btn { grid-column:1 / -1; }
+
+  /* Achievements: the buttons go below the name and link */
+  .ach-section-header { flex-wrap:wrap; gap:8px; }
+  .ach-card-view { flex-wrap:wrap; }
+  .ach-card-info { flex-basis:calc(100% - 56px); }
+  .ach-card-actions { flex:1 1 100%; justify-content:flex-end; }
+
+  /* Dashboard: two cards per row */
+  .dash-grid { grid-template-columns:repeat(auto-fill, minmax(130px, 1fr)); gap:8px; }
+  .dash-card { padding:14px 10px; }
+  .dash-card-val { font-size:24px; }
+  .group-bar-name { width:90px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+
+  /* Login */
+  .login-screen { padding:16px; }
+  .login-card { padding:24px 20px; }
+}
+
+/* ===== Touch screens under 1100px: finger-sized form controls ===== */
+@media (max-width: 1099.98px) and (pointer: coarse) {
+  #panelSection input:not([type="checkbox"]):not([type="file"]):not([type="color"]),
+  #panelSection select,
+  #panelSection .btn { min-height: 40px; }
+}

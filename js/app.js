@@ -21,8 +21,12 @@ const els = {
   search:        $("search"),
   refresh:       $("refresh"),
 
-  profileTitle:  $("profileTitle"),
-  currentRating: $("currentRating"),
+  profileTitle:      $("profileTitle"),
+  currentRating:     $("currentRating"),
+  currentRatingNote: $("currentRatingNote"),
+  liveStat:          $("liveStat"),
+  liveRating:        $("liveRating"),
+  liveRatingNote:    $("liveRatingNote"),
 
   history:       $("history"),
   chart:         $("chart"),
@@ -59,7 +63,7 @@ const els = {
 
 /* ================== STATE ================== */
 const state = {
-  players: [],            // [{ nick, series, ends }] — ends = the series without start-of-day entries
+  players: [],            // [{ nick, series, ends }] — ends = the end-of-day entries (no start or adjusted ones)
   hiddenNicks: new Set(),
   groups: [],             // normalized rating groups from buildRatings()
   selected: null,         // a state.globalRows entry
@@ -227,7 +231,8 @@ function applyData({ leaderboard, history, groups }, hiddenRows, achievements, p
 
   state.groups = groups;
   state.hiddenNicks = new Set(hiddenRows.map((r) => r.nick));
-  // The engine's history is date-ordered, with each start entry right before its day's end entry.
+  // The engine's history is date-ordered: per day an optional start entry, any adjusted entries,
+  // then the day's end entry.
   state.players = leaderboard.map((p) => {
     const series = history[p.nickname] ?? [];
     return { nick: p.nickname, series, ends: endEntries(series) };
@@ -445,7 +450,8 @@ function rowFor(nick) {
 
 /* ================== SELECT PLAYER ================== */
 /* user: the viewer picked the player (row, search, banner), so ?player= is updated.
- * scroll: on phones, also bring the profile into view (explicit row or banner picks only).
+ * scroll: on phones and tablets, also bring the player into view (explicit row or banner picks
+ *   only; see scrollToProfile).
  * animate: false redraws the chart in place (refresh). */
 function selectPlayer(p, { user = false, scroll = false, animate = true } = {}) {
   state.selected = p;
@@ -453,8 +459,28 @@ function selectPlayer(p, { user = false, scroll = false, animate = true } = {}) 
 
   for (const tr of els.tbody?.rows ?? []) tr.classList.toggle("active", tr.dataset.nick === p.nick);
 
+  renderRatingTiles(p);
   renderProfile(animate);
   if (scroll) scrollToProfile();
+}
+
+/* The profile's rating tiles. They ignore the date range, so they change only with the
+ * selection and with each data load (which re-selects the player).
+ * Current: the rating at the end of the previous work day (07:30 -> 07:30 Kyiv time).
+ * Live: the latest rating, which includes the current work day's results once there are any. */
+function renderRatingTiles(p) {
+  const workDay = workDayOf();
+  const current = lastEntryOnOrBefore(p.ends, shiftIsoDate(workDay, -1));
+  const live = p.ends.at(-1) ?? null;
+  const liveToday = live?.date === workDay;
+
+  if (els.currentRating) els.currentRating.textContent = fmt(current?.rating);
+  if (els.currentRatingNote) els.currentRatingNote.textContent = current ? `end of ${current.date}` : "—";
+  if (els.liveRating) els.liveRating.textContent = fmt(live?.rating);
+  if (els.liveRatingNote) {
+    els.liveRatingNote.textContent = !live ? "—" : liveToday ? `work day ${workDay}` : `last results ${live.date}`;
+  }
+  els.liveStat?.classList.toggle("is-today", liveToday);
 }
 
 function renderProfile(animate = true) {
@@ -462,7 +488,6 @@ function renderProfile(animate = true) {
   if (!p) return;
 
   if (els.profileTitle) els.profileTitle.textContent = p.nick;
-  if (els.currentRating) els.currentRating.textContent = fmt(p.rating);
 
   setPlayerPhoto(p.nick);
   setPlayerGroup(p.rating);
@@ -472,14 +497,27 @@ function renderProfile(animate = true) {
   drawChartAnimated(sliceByRange(p.ends, state.dateFrom, state.dateTo), animate);
 }
 
-/* Mobile: scroll to the profile section, below the sticky header (scroll-margin-top). */
+/* Phones and tablets: bring the selected player into view, below the sticky header
+ * (scroll-margin-top). Phones (< 768px) stack the cards, so every pick scrolls to the profile.
+ * Tablets (768-1099px) show the player's photo card and profile beside the leaderboard, so a
+ * pick scrolls only when the top of that column is off screen. Desktop never scrolls.
+ * The breakpoints match css/styles.css. */
 function scrollToProfile() {
-  if (window.innerWidth > 768) return;
-  const profileCard = document.querySelector(".grid .card:nth-child(2)");
-  if (!profileCard) return;
+  const width = window.innerWidth;
+  if (width >= 1100) return;
+  const phone = width < 768;
+  const target = document.querySelector(phone ? ".profileCard" : ".photoCard");
+  if (!target) return;
   const topbar = document.querySelector(".topbar");
-  if (topbar) document.documentElement.style.setProperty("--topbar-h", `${topbar.offsetHeight}px`);
-  setTimeout(() => profileCard.scrollIntoView({ behavior: "smooth", block: "start" }), 80);
+  const topbarH = topbar?.offsetHeight ?? 0;
+  if (topbar) document.documentElement.style.setProperty("--topbar-h", `${topbarH}px`);
+  setTimeout(() => {
+    if (!phone) {
+      const { top } = target.getBoundingClientRect();
+      if (top >= topbarH && top < window.innerHeight) return;
+    }
+    target.scrollIntoView({ behavior: reducedMotion.matches ? "auto" : "smooth", block: "start" });
+  }, 80);
 }
 
 /* ================== PHOTO + GROUP ================== */
@@ -587,7 +625,7 @@ function openCompareModal(nick1, nick2) {
 
     return `
       <div class="compare-col${isRatingWinner ? " winner" : ""}">
-        ${isRatingWinner ? '<div class="compare-winner-badge">Higher rating</div>' : '<div style="height:22px"></div>'}
+        ${isRatingWinner ? '<div class="compare-winner-badge">Higher rating</div>' : '<div class="compare-badge-spacer"></div>'}
         <img class="compare-col-avatar" alt="" />
         <div class="compare-col-nick">${escapeHtml(p.nick)}</div>
         <div class="compare-stat">
@@ -668,21 +706,25 @@ function renderAchievements(nick) {
 }
 
 /* ================== HISTORY ================== */
-/* One row per day in the range, newest first. A day whose rating was set by an adjustment
- * shows start of day → end of day; other days show the previous day's end → end of day
- * (for the oldest row, the previous day may lie before the range). */
+/* One row per day in the range, newest first. A day whose rating was set at its start (a
+ * reset or a start-of-day adjustment) shows start of day → end of day. Other days show the
+ * previous day's end → end of day (for the oldest row, the previous day may lie before the
+ * range); a manual set during the day is part of that change, not a new start, and gets a
+ * "✎ set" tag plus a note saying what was set and when. Ranks use end-of-day entries only. */
 function renderHistory(p) {
   if (!els.history) return;
   els.history.innerHTML = "";
 
-  // A start entry always comes right before its day's end entry.
+  // Per day the series holds an optional start entry, then any adjusted entries, then the end entry.
   const rows = [];
-  let prevEnd = null, start = null;
+  let prevEnd = null, start = null, sets = [];
   for (const entry of p.series) {
     if (entry.start) { start = entry; continue; }
-    if (inRange(entry.date, state.dateFrom, state.dateTo)) rows.push({ end: entry, start, prev: prevEnd });
+    if (entry.adjusted) { sets.push(entry); continue; }
+    if (inRange(entry.date, state.dateFrom, state.dateTo)) rows.push({ end: entry, start, sets, prev: prevEnd });
     prevEnd = entry;
     start = null;
+    sets = [];
   }
   if (!rows.length) return;
 
@@ -691,12 +733,17 @@ function renderHistory(p) {
 
   const frag = document.createDocumentFragment();
   for (let i = rows.length - 1; i >= 0; i--) {
-    const { end, start: dayStart, prev } = rows[i];
+    const { end, start: dayStart, sets: daySets, prev } = rows[i];
     const rank = rankOnDate(end.date, p.nick);
+    const setNote = daySets.map(describeSet).join("; ");
     let tag = "", value;
     if (dayStart) {
       tag = dayStart.reset ? "🔄 reset" : "✎ adjusted";
       value = change(dayStart.rating, end.rating);
+    } else if (daySets.length) {
+      tag = "✎ set";
+      // No earlier end of day: start from the rating the first set replaced, if any.
+      value = change(prev?.rating ?? daySets[0].from ?? daySets[0].rating, end.rating);
     } else if (prev) {
       value = change(prev.rating, end.rating);
     } else {
@@ -707,13 +754,20 @@ function renderHistory(p) {
     li.innerHTML = `
       <span>${escapeHtml(end.date)}</span>
       <span class="hist-rank">#${rank ?? "—"}</span>
-      <span class="hist-reset-col">${tag}</span>
-      <span>${value}</span>
+      <span class="hist-reset-col"${setNote ? ` title="${escapeHtml(setNote)}"` : ""}>${tag}</span>
+      <span>${value}${setNote ? `<small class="hist-note">${escapeHtml(setNote)}</small>` : ""}</span>
     `;
     frag.appendChild(li);
   }
 
   els.history.appendChild(frag);
+}
+
+/* "set to 1200 (from 1150) at 15:04" for an adjusted history entry. */
+function describeSet(entry) {
+  const from = entry.from != null ? ` (from ${fmt(entry.from)})` : "";
+  const time = entry.time ? ` at ${entry.time}` : "";
+  return `set to ${fmt(entry.rating)}${from}${time}`;
 }
 
 /* ================== CHART ================== */

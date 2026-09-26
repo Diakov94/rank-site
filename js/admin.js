@@ -333,7 +333,8 @@ async function loadAdminData() {
     }
     st.groups = ratingsData ? ratingsData.groups : [];
 
-    /* series: the engine's history entries; ends: the same without start-of-day entries */
+    /* series: the engine's history entries; ends: only the end-of-day entries (one per day,
+     * without the start-of-day and mid-day adjustment entries) */
     st.players = configPlayers.map(function(p) {
       var series = (ratingsData && ratingsData.history[p.nickname]) || [];
       return {
@@ -390,6 +391,15 @@ function switchTab(tab) {
     if (btn) btn.classList.toggle("tab-active", key === tab);
     if (sec) sec.style.display = key === tab ? "block" : "none";
   });
+  /* On a narrow screen the tab row scrolls sideways: bring the chosen tab fully into view.
+   * Only the row scrolls, never the page; where every tab fits (desktop) nothing moves. */
+  var activeTab = document.getElementById("tab" + tab.charAt(0).toUpperCase() + tab.slice(1));
+  var tabRow = activeTab && activeTab.parentElement;
+  if (tabRow && tabRow.scrollWidth > tabRow.clientWidth) {
+    var tabBox = activeTab.getBoundingClientRect(), rowBox = tabRow.getBoundingClientRect();
+    if (tabBox.left < rowBox.left) tabRow.scrollLeft -= rowBox.left - tabBox.left;
+    else if (tabBox.right > rowBox.right) tabRow.scrollLeft += tabBox.right - rowBox.right;
+  }
   if (tab === "dashboard") renderDashboard();
   if (tab === "log") loadLog();
   if (tab === "groups") loadGroupsTab();
@@ -713,9 +723,13 @@ async function loadAdjustmentsTab() {
   // Populate player select
   fillAdjNickSelect();
 
-  // Default date = today (local)
+  // Default date = the current work day (07:30–07:30 Kyiv), so a new adjustment applies from now.
+  // A default the admin has not changed moves on with the work day each time the tab (re)loads,
+  // so a page left open past 07:30 does not backdate the next adjustment to yesterday's start.
   var adjDate = document.getElementById("adjDate");
-  if (adjDate && !adjDate.value) adjDate.value = localIsoDate();
+  if (adjDate && (!adjDate.value || adjDate.value === adjDate.dataset.defaultDate)) {
+    adjDate.value = adjDate.dataset.defaultDate = workDayOf();
+  }
 
   // Load existing manual adjustments (monthly resets live in the Monthly Reset tab)
   try {
@@ -728,16 +742,25 @@ async function loadAdjustmentsTab() {
   }
 }
 
+/* When an adjustment takes effect within its work day (Kyiv time): the moment it was saved,
+ * or the start of the day for a row dated another day or saved before created_at existed. */
+function adjustmentEffectText(row) {
+  var moment = adjustmentMoment(row);
+  return moment ? moment.time : "07:30 (start of day)";
+}
+
 function renderAdjustmentsList(rows) {
   var container = document.getElementById("adjList");
   if (!container) return;
   if (!rows.length) { container.innerHTML = '<p class="loading-msg">No adjustments yet.</p>'; return; }
   container.innerHTML =
     (rows.length >= ADJ_LIST_LIMIT ? '<p class="dash-h3" style="margin-top:0;">Showing the latest ' + ADJ_LIST_LIMIT + ' manual adjustments.</p>' : '') +
+    '<div class="adj-table-wrap">' +
     '<table style="width:100%;border-collapse:collapse;font-size:13px;">' +
     '<thead><tr style="opacity:0.5;text-align:left;">' +
     '<th style="padding:6px 8px;">Date</th><th style="padding:6px 8px;">Player</th>' +
-    '<th style="padding:6px 8px;">New Rating</th><th style="padding:6px 8px;">Reason</th>' +
+    '<th style="padding:6px 8px;">New Rating</th><th style="padding:6px 8px;">Takes effect</th>' +
+    '<th style="padding:6px 8px;">Reason</th>' +
     '<th style="padding:6px 8px;"></th></tr></thead>' +
     '<tbody>' +
     rows.map(function(r) {
@@ -745,13 +768,14 @@ function renderAdjustmentsList(rows) {
         '<td style="padding:6px 8px;">' + escapeHtml(r.applied_date) + '</td>' +
         '<td style="padding:6px 8px;font-weight:600;">' + escapeHtml(r.nickname) + '</td>' +
         '<td style="padding:6px 8px;color:var(--accent);">' + escapeHtml(numOrEmpty(r.new_rating)) + '</td>' +
+        '<td style="padding:6px 8px;font-variant-numeric:tabular-nums;">' + escapeHtml(adjustmentEffectText(r)) + '</td>' +
         '<td style="padding:6px 8px;opacity:0.6;">' + escapeHtml(r.reason || "—") + '</td>' +
         '<td style="padding:6px 8px;">' +
           '<button class="btn adj-del-btn" data-id="' + escapeHtml(r.id) + '" type="button" ' +
           'style="font-size:11px;color:#ff7676;padding:3px 8px;">✕</button>' +
         '</td></tr>';
     }).join("") +
-    '</tbody></table>';
+    '</tbody></table></div>';
 
   container.querySelectorAll(".adj-del-btn").forEach(function(btn) {
     btn.addEventListener("click", function() {
@@ -1121,9 +1145,46 @@ function openAchievementPicker(nick, btnEl) {
   picker.style.top = (rect.bottom + 6) + "px";
   picker.style.right = (window.innerWidth - rect.right) + "px";
   document.body.appendChild(picker);
+  keepPickerOnScreen(picker, rect);
   setTimeout(function() {
     document.addEventListener("click", onPickerOutsideClick, true);
   }, 0);
+}
+
+/* The picker opens right-aligned under its button. Where that leaves the screen (on a phone
+ * the button sits at the left of its row; a row near the bottom has no room below), it moves
+ * back inside, 8px from the edges, or opens above the button when there is more room there.
+ * Where it is fully on screen, nothing changes. */
+function keepPickerOnScreen(picker, btnRect) {
+  var edge = 8, gap = 6;
+  var viewW = document.documentElement.clientWidth;
+  var viewH = window.innerHeight;
+  if (!viewW || !viewH) return; // no layout to fit into
+  var box = picker.getBoundingClientRect();
+
+  if (box.left < 0 || box.right > viewW) {
+    /* Measure the width it takes with the whole screen available, then fix that width and
+     * align its right edge with the button as far as the screen allows. */
+    picker.style.right = "auto";
+    picker.style.left = edge + "px";
+    picker.style.maxWidth = (viewW - 2 * edge) + "px";
+    var width = picker.getBoundingClientRect().width;
+    picker.style.width = width + "px";
+    picker.style.left = Math.max(edge, Math.min(btnRect.right - width, viewW - edge - width)) + "px";
+    box = picker.getBoundingClientRect(); // its height can differ at the new width
+  }
+
+  if (box.bottom > viewH) {
+    var below = viewH - btnRect.bottom - gap - edge;
+    var above = btnRect.top - gap - edge;
+    if (above > below) {
+      var height = Math.min(box.height, above);
+      picker.style.maxHeight = height + "px";
+      picker.style.top = (btnRect.top - gap - height) + "px";
+    } else {
+      picker.style.maxHeight = Math.max(below, 0) + "px";
+    }
+  }
 }
 
 function onPickerOutsideClick(e) {

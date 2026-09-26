@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="./css/admin.css" />
 </head>
 <body>
+<div class="alpha-strip" role="note"><strong>ALPHA PRODUCT</strong> <span>Not a final product — ratings, data and features may change.</span></div>
 
 <!-- LOADING OVERLAY -->
 <div id="adminLoadingOverlay" class="loading-overlay hidden">
@@ -41,7 +42,7 @@
   <header class="admin-header">
     <div class="container admin-header-row">
       <h1 class="admin-title">ESB Admin</h1>
-      <div style="display:flex;gap:8px;align-items:center;">
+      <div class="admin-header-actions">
         <a href="./index.html" class="btn" style="text-decoration:none;font-size:13px;">← Back to site</a>
         <button id="logoutBtn" class="btn" type="button" style="font-size:13px;">Log out</button>
       </div>
@@ -72,14 +73,14 @@
       <!-- Load failures that do not empty the list (ratings, visibility, badges) -->
       <div id="playerLoadError" class="load-error-box" style="display:none;"></div>
       <!-- Add new player -->
-      <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:16px;padding:14px;background:rgba(255,255,255,0.04);border-radius:10px;">
-        <div class="field" style="margin:0;">
+      <div class="admin-form">
+        <div class="field">
           <label class="tg-label">Nickname</label>
-          <input id="newPlayerNick" type="text" placeholder="e.g. PlayerName" style="background:#1a2030;border:1px solid rgba(255,255,255,0.12);color:#fff;padding:6px 10px;border-radius:6px;font-size:13px;width:150px;" />
+          <input id="newPlayerNick" class="admin-input admin-input--nick" type="text" placeholder="e.g. PlayerName" />
         </div>
-        <div class="field" style="margin:0;">
+        <div class="field">
           <label class="tg-label">Starting rating</label>
-          <input id="newPlayerRating" type="number" step="0.5" min="0" placeholder="Enter rating" style="background:#1a2030;border:1px solid rgba(255,255,255,0.12);color:#fff;padding:6px 10px;border-radius:6px;font-size:13px;width:100px;" />
+          <input id="newPlayerRating" class="admin-input admin-input--rating" type="number" step="0.5" min="0" placeholder="Enter rating" />
         </div>
         <button id="addPlayerBtn" class="btn" type="button" style="background:var(--accent);color:#0b0f14;font-weight:700;font-size:13px;">+ Add Player</button>
         <span id="addPlayerMsg" style="font-size:13px;display:none;"></span>
@@ -153,14 +154,14 @@
       </p>
 
       <!-- Year / Month selectors -->
-      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:20px;">
-        <div class="field" style="margin:0;">
+      <div class="reset-controls">
+        <div class="field">
           <label class="tg-label">Year</label>
-          <select id="resetYear" style="background:#1a2030;border:1px solid rgba(255,255,255,0.12);color:#fff;padding:6px 10px;border-radius:6px;font-size:13px;min-width:90px;"></select>
+          <select id="resetYear" class="admin-input admin-input--year"></select>
         </div>
-        <div class="field" style="margin:0;">
+        <div class="field">
           <label class="tg-label">Month</label>
-          <select id="resetMonth" style="background:#1a2030;border:1px solid rgba(255,255,255,0.12);color:#fff;padding:6px 10px;border-radius:6px;font-size:13px;min-width:130px;">
+          <select id="resetMonth" class="admin-input admin-input--month">
             <option value="01">January</option>
             <option value="02">February</option>
             <option value="03">March</option>
@@ -175,8 +176,8 @@
             <option value="12">December</option>
           </select>
         </div>
-        <button id="applyResetBtn" class="btn" type="button" style="background:var(--accent);color:#0b0f14;font-weight:700;font-size:13px;margin-top:18px;">💾 Save Reset</button>
-        <span id="resetMsg" style="font-size:13px;color:var(--accent);display:none;margin-top:18px;">✓ Saved!</span>
+        <button id="applyResetBtn" class="btn reset-controls-offset" type="button" style="background:var(--accent);color:#0b0f14;font-weight:700;font-size:13px;">💾 Save Reset</button>
+        <span id="resetMsg" class="reset-controls-offset" style="font-size:13px;color:var(--accent);display:none;">✓ Saved!</span>
       </div>
 
       <!-- Applied date display -->
@@ -191,26 +192,28 @@
         <h2 class="ach-section-title">Rating Adjustments</h2>
       </div>
       <p class="dash-h3" style="margin-top:0;margin-bottom:16px;">
-        Manually correct a player's rating at a specific date. Applied in chronological order by the engine.
-        Monthly resets are not listed here; they are managed in the Monthly Reset tab.
+        Sets a player's rating to the value entered. Dated the current work day (07:30–07:30 Kyiv time), it takes
+        effect when saved: that day's earlier results still count with the old rating, later ones build on the new value.
+        Dated another day, it takes effect at 07:30, the start of that work day. Earlier history is kept; this is
+        not a reset. Monthly resets are not listed here; they are managed in the Monthly Reset tab.
       </p>
       <!-- Add form -->
-      <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:20px;padding:16px;background:rgba(255,255,255,0.04);border-radius:10px;">
-        <div class="field" style="margin:0;">
+      <div class="admin-form admin-form--roomy">
+        <div class="field">
           <label class="tg-label">Player</label>
-          <select id="adjNick" style="background:#1a2030;border:1px solid rgba(255,255,255,0.12);color:#fff;padding:6px 10px;border-radius:6px;font-size:13px;min-width:140px;"></select>
+          <select id="adjNick" class="admin-input admin-input--player"></select>
         </div>
-        <div class="field" style="margin:0;">
+        <div class="field">
           <label class="tg-label">New Rating</label>
-          <input id="adjRating" type="number" step="0.5" min="0" placeholder="e.g. 1000" style="background:#1a2030;border:1px solid rgba(255,255,255,0.12);color:#fff;padding:6px 10px;border-radius:6px;font-size:13px;width:110px;" />
+          <input id="adjRating" class="admin-input admin-input--adj-rating" type="number" step="0.5" min="0" placeholder="e.g. 1000" />
         </div>
-        <div class="field" style="margin:0;">
+        <div class="field">
           <label class="tg-label">Date</label>
-          <input id="adjDate" type="date" style="background:#1a2030;border:1px solid rgba(255,255,255,0.12);color:#fff;padding:6px 10px;border-radius:6px;font-size:13px;" />
+          <input id="adjDate" class="admin-input" type="date" />
         </div>
-        <div class="field" style="margin:0;flex:1;min-width:140px;">
+        <div class="field admin-form-grow">
           <label class="tg-label">Reason (optional)</label>
-          <input id="adjReason" type="text" placeholder="e.g. penalty" style="background:#1a2030;border:1px solid rgba(255,255,255,0.12);color:#fff;padding:6px 10px;border-radius:6px;font-size:13px;width:100%;" />
+          <input id="adjReason" class="admin-input admin-input--full" type="text" placeholder="e.g. penalty" />
         </div>
         <button id="addAdjBtn" class="btn" type="button" style="background:var(--accent);color:#0b0f14;font-weight:700;font-size:13px;white-space:nowrap;">+ Add</button>
       </div>
@@ -232,7 +235,7 @@
     <div id="sectionFormula" style="display:none;padding-bottom:32px;">
       <div class="ach-section-header" style="margin-bottom:4px;"><h2 class="ach-section-title">Rating Formula</h2></div>
       <p class="dash-h3" style="margin-top:0;margin-bottom:16px;">Set the base points applied to wins and draws. Values are stored in Supabase. Each match awards min + 0, 1, 2 … points up to max, so max − min must be a whole number.</p>
-      <div class="stats-bar" style="align-items:flex-end;">
+      <div class="stats-bar formula-bar">
         <label class="field"><span class="tg-label">Win min</span><input id="formulaWinMin" type="number" step="0.01" value="3"></label>
         <label class="field"><span class="tg-label">Win max</span><input id="formulaWinMax" type="number" step="0.01" value="3"></label>
         <label class="field"><span class="tg-label">Draw min</span><input id="formulaDrawMin" type="number" step="0.01" value="1"></label>
