@@ -4,12 +4,12 @@
 
 ## English
 
-The website deploys as usual, but this version also changes the Supabase database and
-adds a server function. Those parts are not deployed with the website, so do them by
-hand, **in this order**. If the new website goes live before steps 1 and 2, no one can
-sign in to the admin panel. From step 1 until the new website is live (step 4), the admin
-panel that is live now still opens but cannot save anything, while the public page keeps
-working, so do steps 1–4 in one sitting.
+The website deploys as usual, but this version also changes the Supabase database, adds a
+server function and updates the `esb-sync` function. Those parts are not deployed with
+the website, so do them by hand, **in this order**. If the new website goes live before
+steps 1 and 2, no one can sign in to the admin panel. From step 1 until the new website
+is live (step 4), the admin panel that is live now still opens but cannot save anything,
+while the public page keeps working, so do steps 1–4 in one sitting.
 
 ### 1. Apply the database migrations
 
@@ -62,7 +62,7 @@ on conflict (user_id) do update set role_id = excluded.role_id;
 
 After that you can create every other user and role from the admin panel.
 
-### 3. Deploy the user-management function
+### 3. Deploy the server functions
 
 The admin panel's **Users** tab creates and deletes accounts through the `admin-users`
 function. From the repository folder:
@@ -79,6 +79,18 @@ on projects that use Supabase's new API keys, as this one does. The function che
 every caller's token itself. Supabase provides the project URL and keys to the function
 automatically, so there are no secrets to set, and the master key never reaches the
 browser.
+
+If you use the `esb-sync` function, redeploy it too, so the fixes in this version take
+effect:
+
+```sh
+supabase functions deploy esb-sync --no-verify-jwt
+```
+
+Until you do, the old version keeps running as before. The flag keeps the function
+callable whatever key its caller sends. Unless you set `SYNC_SECRET` (see "Optional
+hardening" below), anyone who knows its URL can start a sync, which only copies finished
+matches from ESportsBattle.
 
 ### 4. Deploy the website
 
@@ -110,18 +122,22 @@ Merge the pull request so that your hosting publishes the new version.
 | --- | --- |
 | "This account has no role in the admin panel." | Do step 2 for that account, or give it a role in the Users tab. |
 | "Could not verify admin access." | Check that both migrations ran (step 1). |
-| The Users tab shows an error | The function is not deployed yet (step 3). |
-| The Users tab says "The server function rejected your sign-in (… Invalid JWT …)" | Deploy the function again with `--no-verify-jwt` (step 3). |
+| The Users tab shows an error | The `admin-users` function is not deployed yet (step 3). |
+| The Users tab says "The server function rejected your sign-in (… Invalid JWT …)" | Deploy `admin-users` again with `--no-verify-jwt` (step 3). |
 | Locked out of the admin panel | The SQL Editor always works, whatever the roles are. Run step 2 again for your account. |
+| `esb-sync` answers 400 | The request has a date that is not a real `YYYY-MM-DD` date, `dateFrom` after `dateTo` (after today when `dateTo` is left out), or `dateTo` without `dateFrom`. |
+| `esb-sync` answers 500 with "settings.esb_sync_cursor is …" | The `esb_sync_cursor` row in the `settings` table is not a date on or before today. Fix it, or delete it to start again from 2026-01-01. |
+| The `errors` from `esb-sync` say "refused by the database" | Those matches were skipped. Fix the cause (for example a changed field type or a new constraint on `matches`), then sync the days named in those errors again (when `errorCount` is above 10, the full list is in the function's logs in the Supabase dashboard) by sending `POST {"dateFrom": "YYYY-MM-DD", "dateTo": "YYYY-MM-DD"}` to the function. |
 
 ## Українська
 
-Сайт розгортається як завжди, але ця версія також змінює базу даних Supabase і додає
-серверну функцію. Ці частини не розгортаються разом із сайтом, тому виконайте їх вручну,
-**саме в такому порядку**. Якщо новий сайт запрацює раніше, ніж виконано кроки 1 і 2,
-ніхто не зможе увійти в адмін-панель. Від кроку 1 і доки не запрацює новий сайт (крок 4),
-адмін-панель, яка працює зараз, відкривається, але не може нічого зберегти, тоді як
-публічна сторінка працює як звичайно, тож виконайте кроки 1–4 за один раз.
+Сайт розгортається як завжди, але ця версія також змінює базу даних Supabase, додає
+серверну функцію й оновлює функцію `esb-sync`. Ці частини не розгортаються разом із
+сайтом, тому виконайте їх вручну, **саме в такому порядку**. Якщо новий сайт запрацює
+раніше, ніж виконано кроки 1 і 2, ніхто не зможе увійти в адмін-панель. Від кроку 1 і
+доки не запрацює новий сайт (крок 4), адмін-панель, яка працює зараз, відкривається, але
+не може нічого зберегти, тоді як публічна сторінка працює як звичайно, тож виконайте
+кроки 1–4 за один раз.
 
 ### 1. Застосуйте міграції бази даних
 
@@ -175,7 +191,7 @@ on conflict (user_id) do update set role_id = excluded.role_id;
 
 Після цього всіх інших користувачів і ролі можна створювати в адмін-панелі.
 
-### 3. Розгорніть функцію керування користувачами
+### 3. Розгорніть серверні функції
 
 Вкладка **Users** в адмін-панелі створює та видаляє облікові записи через функцію
 `admin-users`. У папці репозиторію виконайте:
@@ -192,6 +208,18 @@ supabase functions deploy admin-users --no-verify-jwt
 токен кожного, хто її викликає. Supabase автоматично передає функції URL проєкту та
 ключі, тож жодних секретів налаштовувати не потрібно, а головний ключ ніколи не потрапляє
 в браузер.
+
+Якщо ви використовуєте функцію `esb-sync`, розгорніть і її повторно, щоб запрацювали
+виправлення з цієї версії:
+
+```sh
+supabase functions deploy esb-sync --no-verify-jwt
+```
+
+Доки ви цього не зробите, працює стара версія, як і раніше. Прапорець залишає функцію
+доступною, хоч би який ключ надсилав той, хто її викликає. Якщо не налаштувати
+`SYNC_SECRET` (див. розділ "Додатковий захист" нижче), синхронізацію може запустити кожен, хто знає
+URL функції; вона лише копіює завершені матчі з ESportsBattle.
 
 ### 4. Розгорніть сайт
 
@@ -223,6 +251,9 @@ supabase functions deploy admin-users --no-verify-jwt
 | --- | --- |
 | "This account has no role in the admin panel." | Виконайте крок 2 для цього облікового запису або призначте йому роль на вкладці Users. |
 | "Could not verify admin access." | Перевірте, що обидві міграції виконано (крок 1). |
-| На вкладці Users показується помилка | Функцію ще не розгорнуто (крок 3). |
-| На вкладці Users написано "The server function rejected your sign-in (… Invalid JWT …)" | Розгорніть функцію ще раз із `--no-verify-jwt` (крок 3). |
+| На вкладці Users показується помилка | Функцію `admin-users` ще не розгорнуто (крок 3). |
+| На вкладці Users написано "The server function rejected your sign-in (… Invalid JWT …)" | Розгорніть `admin-users` ще раз із `--no-verify-jwt` (крок 3). |
 | Немає доступу до адмін-панелі | SQL Editor працює завжди, незалежно від ролей. Виконайте крок 2 ще раз для свого облікового запису. |
+| `esb-sync` повертає код 400 | У запиті є дата, що не є справжньою датою у форматі `YYYY-MM-DD`, `dateFrom` пізніша за `dateTo` (або за сьогоднішню дату, якщо `dateTo` не передано), або `dateTo` передано без `dateFrom`. |
+| `esb-sync` повертає код 500 з повідомленням "settings.esb_sync_cursor is …" | У рядку `esb_sync_cursor` таблиці `settings` записано не дату або дату, пізнішу за сьогоднішню. Виправте його або видаліть, щоб почати знову з 2026-01-01. |
+| У `errors` від `esb-sync` написано "refused by the database" | Ці матчі пропущено. Усуньте причину (наприклад, змінений тип поля або нове обмеження в `matches`), а потім ще раз синхронізуйте дні, названі в цих помилках (якщо `errorCount` більший за 10, повний список є в журналі функції на панелі Supabase): надішліть функції `POST {"dateFrom": "YYYY-MM-DD", "dateTo": "YYYY-MM-DD"}`. |

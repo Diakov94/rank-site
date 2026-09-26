@@ -29,6 +29,7 @@ const FETCH_TIMEOUT_MS = 15_000; // per ESB request
 const MATCH_LIST_CONCURRENCY = 4; // ESB match-list requests in flight per day
 const IDS_PER_DUPLICATE_CHECK = 200; // external ids per .in() query (keeps the URL short)
 const TIME_BUDGET_MS = 100_000; // no new day is started after this (the platform limit is 150 s)
+const INSERT_DEADLINE_MS = 130_000; // one-by-one inserts stop here, leaving time to save the cursor
 const SYNC_SECRET = Deno.env.get("SYNC_SECRET") ?? "";
 
 const CORS_HEADERS = {
@@ -92,7 +93,10 @@ async function allSettledLimited<T, R>(
 }
 
 function jsonResponse(body: unknown, status = 200, extraHeaders: Record<string, string> = {}): Response {
-  return new Response(JSON.stringify(body), {
+  const text = JSON.stringify(body);
+  // Callers often discard the response, so failed runs and server errors also go to the logs.
+  if ((status === 200 || status >= 500) && (body as { ok?: boolean }).ok === false) console.error(text);
+  return new Response(text, {
     status,
     headers: { ...CORS_HEADERS, "Content-Type": "application/json", ...extraHeaders },
   });
@@ -190,7 +194,14 @@ function collectMatchRows(
       errors.push(`tournament ${tournament.id}: match without id, skipped`);
       continue;
     }
-    const key = String(id);
+    // external_id is a bigint column: any other id would fail the day's duplicate check, and
+    // one beyond 2^53 would not come back from the table as the same number.
+    const externalId = typeof id === "string" && /^\d+$/.test(id) ? Number(id) : id;
+    if (!Number.isSafeInteger(externalId)) {
+      errors.push(`tournament ${tournament.id}: match with unusable id ${JSON.stringify(id)}, skipped`);
+      continue;
+    }
+    const key = String(externalId);
     if (seen.has(key) || rows.has(key) || tournamentRows.has(key)) continue;
 
     const playedAt: string = typeof m.date === "string" ? m.date : "";
@@ -202,7 +213,7 @@ function collectMatchRows(
     }
 
     tournamentRows.set(key, {
-      external_id: id,
+      external_id: externalId,
       date: datePart,
       time: timePart,
       tournament: tournamentName,
@@ -218,42 +229,85 @@ function collectMatchRows(
   for (const [key, row] of tournamentRows) rows.set(key, row);
 }
 
+/** True when Postgres refused a row because of its data (SQLSTATE class 22 or 23), not the network or database. */
+function isRowRejection(error: { code?: string } | null): boolean {
+  return /^2[23]/.test(error?.code ?? "");
+}
+
 /**
- * Inserts the rows whose external_id is not in the table yet, in one batch, and returns
- * the number inserted. Throws when a duplicate check or the insert fails.
+ * Inserts the rows whose external_id is not in the table yet, in one batch. When Postgres
+ * refuses the batch because of a row's data, the rows go in one at a time, and the refused
+ * ones are skipped and reported in `errors`, so one bad match cannot hold the day back.
+ * `failed` means the day must be retried: a duplicate check or an insert failed for another
+ * reason, or the one-by-one inserts ran past `deadline`. Rows inserted before that stay in
+ * the table and are counted in `inserted`.
  */
-async function insertNewRows(rows: Map<string, Record<string, unknown>>, seen: Set<string>): Promise<number> {
+async function insertNewRows(
+  day: string,
+  rows: Map<string, Record<string, unknown>>,
+  seen: Set<string>,
+  errors: string[],
+  deadline: number
+): Promise<{ inserted: number; failed: boolean }> {
   const ids = [...rows.values()].map((r) => r.external_id);
   for (let i = 0; i < ids.length; i += IDS_PER_DUPLICATE_CHECK) {
     const { data: existing, error: selectError } = await supabase
       .from("matches")
       .select("external_id")
       .in("external_id", ids.slice(i, i + IDS_PER_DUPLICATE_CHECK));
-    if (selectError) throw new Error(`duplicate check failed: ${selectError.message}`);
+    if (selectError) {
+      errors.push(`day ${day}: duplicate check failed: ${selectError.message}`);
+      return { inserted: 0, failed: true };
+    }
     for (const row of existing ?? []) {
       const key = String(row.external_id);
       rows.delete(key);
       seen.add(key);
     }
   }
-  if (rows.size === 0) return 0;
+  if (rows.size === 0) return { inserted: 0, failed: false };
 
-  const { error: insertError } = await supabase.from("matches").insert([...rows.values()]);
-  if (insertError) throw new Error(`insert of ${rows.size} matches failed: ${insertError.message}`);
-  for (const key of rows.keys()) seen.add(key);
-  return rows.size;
+  const { error: batchError } = await supabase.from("matches").insert([...rows.values()]);
+  if (!batchError) {
+    for (const key of rows.keys()) seen.add(key);
+    return { inserted: rows.size, failed: false };
+  }
+  if (!isRowRejection(batchError)) {
+    errors.push(`day ${day}: insert of ${rows.size} matches failed: ${batchError.message}`);
+    return { inserted: 0, failed: true };
+  }
+
+  let inserted = 0;
+  for (const [key, row] of rows) {
+    if (Date.now() > deadline) {
+      errors.push(`day ${day}: out of time after ${inserted} one-by-one inserts; the rest is retried next run`);
+      return { inserted, failed: true };
+    }
+    const { error } = await supabase.from("matches").insert(row);
+    if (error && !isRowRejection(error)) {
+      errors.push(`day ${day}: insert of match ${key} failed: ${error.message}`);
+      return { inserted, failed: true };
+    }
+    seen.add(key);
+    // A duplicate external_id means an overlapping run stored the match after the duplicate check.
+    const alreadyStored = error?.code === "23505" && /\(external_id\)/.test(error.details ?? "");
+    if (!error) inserted++;
+    else if (!alreadyStored) errors.push(`day ${day} match ${key}: refused by the database (${error.message}), skipped`);
+  }
+  return { inserted, failed: false };
 }
 
 /**
  * Syncs one day: fetches its tournaments' match lists (a few at a time), then inserts the
- * day's new matches in one batch. `failed` means the day must be retried: nothing after it
- * counts as done. A failed match-list fetch, duplicate check or insert fails the day; the
- * matches of the tournaments whose lists did load are still inserted.
+ * day's new matches (see insertNewRows). `failed` means the day must be retried: nothing
+ * after it counts as done. A failed match-list fetch fails the day; the matches of the
+ * tournaments whose lists did load are still inserted.
  */
 async function syncDay(
   day: string,
   seen: Set<string>,
-  errors: string[]
+  errors: string[],
+  deadline: number
 ): Promise<{ found: number; inserted: number; failed: boolean }> {
   let tournaments: any[];
   try {
@@ -281,14 +335,8 @@ async function syncDay(
     }
   }
 
-  let inserted = 0;
-  try {
-    inserted = await insertNewRows(rows, seen);
-  } catch (e) {
-    errors.push(`day ${day}: ${errorText(e)}`);
-    failed = true;
-  }
-  return { found: tournaments.length, inserted, failed };
+  const result = await insertNewRows(day, rows, seen, errors, deadline);
+  return { found: tournaments.length, inserted: result.inserted, failed: failed || result.failed };
 }
 
 Deno.serve(async (req) => {
@@ -361,7 +409,7 @@ Deno.serve(async (req) => {
     let sbTournamentsFound = 0;
     let inserted = 0;
     const errors: string[] = [];
-    const seen = new Set<string>(); // external ids already in the table or inserted by this run
+    const seen = new Set<string>(); // external ids already in the table, or inserted or refused in this run
     let processedUpTo: string | null = null; // last day fully synced
     let nextDateFrom: string | null = null; // first day of the range not synced by this run
 
@@ -370,7 +418,7 @@ Deno.serve(async (req) => {
         nextDateFrom = day;
         break;
       }
-      const result = await syncDay(day, seen, errors);
+      const result = await syncDay(day, seen, errors, startedAt + INSERT_DEADLINE_MS);
       sbTournamentsFound += result.found;
       inserted += result.inserted;
       if (result.failed) {
@@ -394,6 +442,8 @@ Deno.serve(async (req) => {
       }
     }
 
+    // The response keeps the first 10 errors, so the logs get the whole list.
+    if (errors.length > 10) console.error(JSON.stringify({ errors }));
     return jsonResponse({
       ok: errors.length === 0,
       mode: manualMode ? "manual" : "auto",

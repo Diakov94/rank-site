@@ -158,7 +158,7 @@ A player's profile shows two ratings:
 | `supabase/migrations/` | SQL for Row Level Security, roles and permissions. |
 | `supabase/tests/roles_test.sql` | SQL self-test of the roles rules; it rolls itself back. |
 | `tests/` | Unit tests (Node's built-in test runner). |
-| `DEPLOY.md` | The deployment runbook, in English and Ukrainian: the manual Supabase steps (migrations, the first super admin, the admin-users function) and the checks after them. |
+| `DEPLOY.md` | The deployment runbook, in English and Ukrainian: the manual Supabase steps (migrations, the first super admin, the admin-users function, redeploying esb-sync) and the checks after them. |
 
 The pages load their scripts as classic `defer` scripts, in this order:
 `index.html` loads `common.js`, `sheets.js`, `engine.js`, `app.js`; `admin.html` loads
@@ -327,8 +327,8 @@ buckets are left to their own policies.
 
 Deploy by [DEPLOY.md](DEPLOY.md), the step-by-step runbook (English and Ukrainian). In
 short, and in one sitting: apply the two migrations in order, make yourself super admin,
-deploy the admin-users function, publish the site, then check it (the SQL self-test is
-optional). The notes below explain how the parts behave; they are not extra steps.
+deploy the admin-users function (and redeploy esb-sync if you use it), publish the site,
+then check it (the SQL self-test is optional). The notes below explain how the parts behave; they are not extra steps.
 
 - **Migrations.** Only the roles migration is safe to run again. It copies `admin_users`
   into `user_roles` as super admins only while `user_roles` is empty, so running it again
@@ -405,13 +405,31 @@ skipping `external_id`s that are already there. **Nothing in the site reads the
 - **Manual mode**: `POST {"dateFrom": "YYYY-MM-DD", "dateTo": "YYYY-MM-DD"}`
   (`dateTo` defaults to today). Syncs up to 14 days of that range and never moves the
   cursor; continue with the returned `nextDateFrom`.
-- A failed ESB request (non-OK status, network error, invalid JSON or 15 s timeout) or a
-  failed duplicate check or insert marks that day as failed. The run stops there and, in auto
-  mode, the cursor stays on that day so it is retried next time. If a day keeps failing,
-  the `errors` in the response say why; the cursor can be moved by editing the
-  `esb_sync_cursor` row. Matches without an id or a `YYYY-MM-DD` date, and match lists
-  that are not arrays, are skipped and reported in `errors` without failing the day.
-  No new day is started after about 100 seconds.
+- A failed ESB request (non-OK status, network error, invalid JSON or 15 s timeout), a
+  failed duplicate check, or an insert that fails for any reason other than a match's data
+  (for example the network, a permission or a missing column) marks that day as failed.
+  The run stops there and, in auto mode, the cursor stays on that day so it is retried
+  next time. If a day keeps failing, the `errors` in the response say why; the cursor can
+  be moved by editing the `esb_sync_cursor` row. No new day is started after about 100
+  seconds, and a day still inserting matches one by one at about 130 seconds stops there
+  and is retried by the next run (the platform limit is 150 s).
+- These are skipped and reported in `errors` without failing the day: matches without an
+  id or with an id that is not a whole number below 2^53 (`external_id` is a bigint; a
+  digit string such as `"0123"` is stored as 123), matches without a `YYYY-MM-DD` date,
+  match lists that are not arrays, and matches the database refuses because of their data
+  (Postgres error class 22 or 23, such as a value of the wrong type). A skipped match is
+  not tried again once the cursor has moved past its day. If the cause hits every match
+  (for example ESB changes a field's type, or `matches` gets a new constraint), whole days
+  are skipped: fix the cause, then sync those dates again in manual mode.
+- A day's new matches go in with one insert. Only when the database refuses it because of
+  a match's data are they inserted one by one, so the other matches are still saved. A
+  match refused only because its `external_id` is already stored (an overlapping run saved
+  it) is skipped without an error.
+- A run that ends with `ok: false` (HTTP 200) or with HTTP 500 also writes its response to
+  the function's logs in the Supabase dashboard, since whatever calls the function may not
+  keep it. The response holds only the first 10 errors, so a run with more also logs the
+  whole list. The "refused by the database" errors name their day, so you know which
+  dates to sync again.
 - Response: HTTP 200 `{ ok, mode, processedFrom, processedUpTo, remaining,
   nextDateFrom, sbTournamentsFound, inserted, errorCount, errors }` for every completed
   run (`ok` is false if anything failed; `errors` holds the first 10). 400 for invalid
@@ -422,10 +440,10 @@ skipping `external_id`s that are already there. **Nothing in the site reads the
   `x-sync-secret: <value>`, otherwise it gets 401. When it is not set, anyone who can
   reach the function URL can run it.
 
-Deploy and configure it with the Supabase CLI (as in DEPLOY.md, "Optional hardening"):
+Deploy and configure it with the Supabase CLI (DEPLOY.md step 3 and "Optional hardening"):
 
 ```sh
-supabase secrets set SYNC_SECRET=<random value>
+supabase secrets set SYNC_SECRET=<random value>    # optional, see SYNC_SECRET above
 supabase functions deploy esb-sync --no-verify-jwt
 ```
 
