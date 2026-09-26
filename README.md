@@ -158,6 +158,7 @@ A player's profile shows two ratings:
 | `supabase/migrations/` | SQL for Row Level Security, roles and permissions. |
 | `supabase/tests/roles_test.sql` | SQL self-test of the roles rules; it rolls itself back. |
 | `tests/` | Unit tests (Node's built-in test runner). |
+| `DEPLOY.md` | The deployment runbook, in English and Ukrainian: the manual Supabase steps (migrations, the first super admin, the admin-users function) and the checks after them. |
 
 The pages load their scripts as classic `defer` scripts, in this order:
 `index.html` loads `common.js`, `sheets.js`, `engine.js`, `app.js`; `admin.html` loads
@@ -271,7 +272,8 @@ buckets are left to their own policies.
 - The last super admin cannot be removed: an update or delete of `user_roles` that leaves
   nobody with the super role fails with "Cannot remove the last super admin" (SQLSTATE
   `PT409`, so PostgREST answers 409). That also blocks deleting that user under
-  Authentication > Users.
+  Authentication > Users. The check takes a lock first, so two super admins removing each
+  other at the same moment cannot both succeed.
 - `user_roles.assigned_at` and `assigned_by` are set by a trigger to the time and the
   signed-in caller, not to values the client sends.
 
@@ -316,60 +318,50 @@ buckets are left to their own policies.
   admin-users function. Changing a user's role upserts their `user_roles` row directly
   (`on_conflict=user_id`); "No role (remove access)" deletes it. The role choices are the
   roles you can grant, and your own row is read-only.
-- **Roles tab:** each role with its name, description, number of users (shown only with
-  `users.manage`, which is needed to read other people's `user_roles` rows) and permission
+- **Roles tab:** each role with its name, description, number of users and permission
   checkboxes; ticking one inserts a `role_permissions` row, unticking deletes it. Only
   the super admin sees this tab, and the database accepts these writes only from the
   super admin. The super role is shown locked, as "All permissions".
 
 ### Rollout
 
-1. **Apply the migrations**, in order: `20260926000000_admin_only_writes.sql`, then
-   `20260927000000_roles.sql`. Paste each into the Supabase SQL editor and run it, or run
-   `supabase db push`. Both are safe to run again. A listed table that does not exist yet
-   is skipped with a warning and gets no protection, so check the output and run the file
-   again after creating such a table. The roles migration copies `admin_users` into
-   `user_roles` as super admins, only while `user_roles` is empty, so running it again
-   never brings back an admin you removed. Do not run the first migration again after the
-   second (it would bring back its `admin_users` checks); if you did, run the second
-   again.
-2. **Add a super admin** if none was copied (the user must already exist under
-   Authentication > Users):
-   ```sql
-   insert into public.user_roles (user_id, role_id)
-   select u.id, r.id
-   from auth.users u, public.roles r
-   where u.email = 'admin@example.com' and r.is_super
-   on conflict (user_id) do update set role_id = excluded.role_id;
-   ```
-   The SQL editor bypasses RLS, so this also works when you are locked out of the admin
-   panel. Everyone else can then be created and given roles in the Users tab.
-3. **Deploy the admin-users function** with the Supabase CLI:
-   ```sh
-   supabase login
-   supabase link --project-ref <project ref>
-   supabase functions deploy admin-users
-   ```
-   Keep JWT verification on (no `--no-verify-jwt`): every call carries a user's access
-   token.
-4. **Deploy the front end.** The new admin panel also works while only the first
-   migration is applied: every admin is then treated as a super admin, and the Users and
-   Roles tabs say they need the roles migration. The admin panel
-   from before the first migration writes with the publishable key, so its writes stop
-   working as soon as that migration runs. The one built for the first migration still
-   signs in after the roles migration, because `is_admin()` now means "has a role", but
-   its writes succeed only where the role allows.
-5. **Run the SQL test** (optional): paste `supabase/tests/roles_test.sql` into the SQL
-   editor and run it, or `psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f
-   supabase/tests/roles_test.sql`. It runs in one transaction that it rolls back, with
-   throwaway users, roles and rows. Each check prints a `PASS` notice (psql shows them;
-   the SQL editor may show only the last result), the first failure stops it with
-   `FAIL ...`, and a full pass ends with the row "roles test: all checks passed". It
-   expects the site tables to exist, and skips the `matches` checks when that table is
-   empty.
+Deploy by [DEPLOY.md](DEPLOY.md), the step-by-step runbook (English and Ukrainian). In
+short, and in one sitting: apply the two migrations in order, make yourself super admin,
+deploy the admin-users function, publish the site, then check it (the SQL self-test is
+optional). The notes below explain how the parts behave; they are not extra steps.
 
-Disabling public sign-ups (Authentication > Providers > Email) is recommended but not
-required: a new account has no role, so it cannot change anything.
+- **Migrations.** Only the roles migration is safe to run again. It copies `admin_users`
+  into `user_roles` as super admins only while `user_roles` is empty, so running it again
+  never brings back an admin you removed. Running the first migration again after the
+  roles migration brings back its `admin_users` checks; running the roles migration once
+  more undoes that. A listed table that does not exist yet is skipped with only a warning
+  and gets no protection, so DEPLOY.md step 1 ends with a query that lists such tables.
+- **The first super admin** is added with SQL (DEPLOY.md step 2). The SQL editor bypasses
+  RLS, so this also works when you are locked out of the admin panel. Everyone else can
+  then be created and given roles in the Users tab.
+- **admin-users** is deployed with `supabase functions deploy admin-users --no-verify-jwt`.
+  The gateway's own JWT check rejects valid sign-ins on projects with Supabase's new API
+  keys, as this one has, and the function verifies every caller's token itself with
+  `auth.getUser` (see [admin-users edge function](#admin-users-edge-function)).
+- **Front-end versions.** The new admin panel also works while only the first migration
+  is applied: every admin is then treated as a super admin, and the Users and Roles tabs
+  say they need the roles migration. The admin panel from before the first migration
+  writes with the publishable key, so its writes stop working as soon as that migration
+  runs, while the public page keeps working. The one built for the first migration still
+  signs in after the roles migration, because `is_admin()` now means "has a role", but
+  its writes succeed only where the role allows.
+- **SQL self-test** (`supabase/tests/roles_test.sql`, optional): paste it into the SQL
+  editor and run it, or `psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f
+  supabase/tests/roles_test.sql`. It runs in one transaction that it rolls back, with
+  throwaway users, roles and rows. Each check prints a `PASS` notice (psql shows them;
+  the SQL editor may show only the last result), the first failure stops it with
+  `FAIL ...`, and a full pass ends with the row "roles test: all checks passed". It
+  expects the site tables to exist, and skips the `matches` checks when that table is
+  empty.
+
+Switching off public sign-ups (Authentication → Sign In / Providers → Allow new users to
+sign up) is recommended but not required: a new account has no role, so it cannot change
+anything.
 
 ## Local development
 
@@ -395,8 +387,8 @@ stub `fetch`. `tests/admin-users.test.js` imports the admin-users function's
 `.github/workflows/test.yml` runs `npm test` on every push and pull request.
 
 The database rules (RLS policies and triggers) are not covered by `npm test`; check them
-against the real project with `supabase/tests/roles_test.sql` (see
-[Rollout](#rollout), step 5).
+against the real project with `supabase/tests/roles_test.sql` (see [Rollout](#rollout)
+and [DEPLOY.md](DEPLOY.md), step 5).
 
 ## esb-sync edge function
 
@@ -430,17 +422,18 @@ skipping `external_id`s that are already there. **Nothing in the site reads the
   `x-sync-secret: <value>`, otherwise it gets 401. When it is not set, anyone who can
   reach the function URL can run it.
 
-Deploy and configure it with the Supabase CLI:
+Deploy and configure it with the Supabase CLI (as in DEPLOY.md, "Optional hardening"):
 
 ```sh
 supabase secrets set SYNC_SECRET=<random value>
-supabase functions deploy esb-sync
+supabase functions deploy esb-sync --no-verify-jwt
 ```
 
-The Supabase gateway also verifies a JWT in `Authorization` unless the function is
-deployed with `--no-verify-jwt`; `SYNC_SECRET` is checked either way. Nothing in this
-repository schedules the function; whatever calls it must send the secret once it is
-set.
+`--no-verify-jwt` turns off the gateway's own JWT check, for the same reason as for
+admin-users: it rejects valid callers on projects with Supabase's new API keys. The
+function then relies on `SYNC_SECRET`, which it checks itself (with or without the
+flag). Nothing in this repository schedules the function; whatever calls it must send
+the secret once it is set.
 
 ## admin-users edge function
 
@@ -469,6 +462,10 @@ could not grant gets 403. Passwords need at least 8 characters. Errors are
 missing permission, 404 for an unknown user, 405 for other methods, 409 when the email is
 taken or for the last super admin, and 500 otherwise.
 
-Deploy it with `supabase functions deploy admin-users` (see [Rollout](#rollout),
-step 3). It uses the project URL and keys that Supabase gives every function, so there
-are no secrets to set.
+Deploy it with `supabase functions deploy admin-users --no-verify-jwt` (DEPLOY.md,
+step 3). The flag turns off only the gateway's own JWT check, which rejects valid sign-ins
+on projects with Supabase's new API keys, as this one has. The function still verifies
+every call itself: `verifyToken` checks the bearer token with `auth.getUser` (401 when it
+is missing or invalid), and the permissions come from `my_access()` called as the caller.
+It uses the project URL and keys that Supabase gives every function, so there are no
+secrets to set.

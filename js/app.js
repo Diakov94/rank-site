@@ -255,10 +255,12 @@ function applyData({ leaderboard, history, groups }, hiddenRows, achievements, p
   renderTable();
 
   // Initial load: the ?player= deep link; refresh: the current selection. Both fall back to #1
-  // when that player is not on the visible board. Neither writes the URL or scrolls.
+  // when that player is not on the visible board. Neither writes the URL. Only the initial load's
+  // deep link, when it found its player, scrolls to them (phones and tablets; see scrollToProfile):
+  // the fallback to #1 and refreshes never scroll.
   const wanted = firstData ? state.deepLinkNick : state.selected?.nick;
   const p = state.globalRows.find((x) => x.nick === wanted) ?? state.globalRows[0];
-  if (p) selectPlayer(p, { animate: firstData });
+  if (p) selectPlayer(p, { animate: firstData, scroll: firstData && p.nick === state.deepLinkNick });
 
   state.loadedAt = Date.now();
 }
@@ -450,8 +452,8 @@ function rowFor(nick) {
 
 /* ================== SELECT PLAYER ================== */
 /* user: the viewer picked the player (row, search, banner), so ?player= is updated.
- * scroll: on phones and tablets, also bring the player into view (explicit row or banner picks
- *   only; see scrollToProfile).
+ * scroll: on phones and tablets, also bring the player into view (explicit row or banner picks,
+ *   and a ?player= deep link that found its player on the first load; see scrollToProfile).
  * animate: false redraws the chart in place (refresh). */
 function selectPlayer(p, { user = false, scroll = false, animate = true } = {}) {
   state.selected = p;

@@ -7,7 +7,9 @@
 The website deploys as usual, but this version also changes the Supabase database and
 adds a server function. Those parts are not deployed with the website, so do them by
 hand, **in this order**. If the new website goes live before steps 1 and 2, no one can
-sign in to the admin panel.
+sign in to the admin panel. From step 1 until the new website is live (step 4), the admin
+panel that is live now still opens but cannot save anything, while the public page keeps
+working, so do steps 1–4 in one sitting.
 
 ### 1. Apply the database migrations
 
@@ -21,12 +23,30 @@ a time and in this order:
 
 The roles file is safe to run again. Do not run the first file again after the roles
 file, because that brings back its old admin checks; if it happens, run the roles file
-again. If the output shows a warning that a table does not exist, create that table and
-run the roles file again, because a missing table is skipped and gets no protection.
+again.
 
 With the [Supabase CLI](https://supabase.com/docs/guides/cli) you can run
 `supabase db push` instead, after linking the project in step 3. It asks for the
 database password and applies the migrations that have not run yet.
+
+Either way, then check that every table got its protection. Run this in the SQL Editor;
+it must return no rows:
+
+```sql
+select t as unprotected_table
+from unnest(array['player_config', 'hidden_players', 'achievements', 'player_achievements',
+                  'rating_groups', 'rating_adjustments', 'settings', 'matches', 'admin_log']) as t
+where not coalesce((select c.relrowsecurity from pg_class c
+                    where c.oid = to_regclass('public.' || t)), false)
+   or (select count(*) from pg_policies p
+       where p.schemaname = 'public' and p.tablename = t
+         and p.policyname in ('esb_perm_only_insert', 'esb_perm_only_update',
+                              'esb_perm_only_delete')) < 3;
+```
+
+Each row names a table that is not protected, usually because it did not exist when the
+roles file ran: such a table is skipped with only a warning, which the SQL Editor may not
+show. Create that table, run the roles file again, then run this check again.
 
 ### 2. Make yourself super admin
 
@@ -80,8 +100,9 @@ Merge the pull request so that your hosting publishes the new version.
   change anything.
 - **Match sync:** if you use the `esb-sync` function, you can protect it by running
   `supabase secrets set SYNC_SECRET=<random value>` and redeploying it with
-  `supabase functions deploy esb-sync --no-verify-jwt`. Anything that calls it must then
-  send the header `x-sync-secret`.
+  `supabase functions deploy esb-sync --no-verify-jwt` (the flag is needed for the same
+  reason as in step 3; the function checks the secret itself). Anything that calls it must
+  then send the header `x-sync-secret`.
 
 ### If something goes wrong
 
@@ -98,7 +119,9 @@ Merge the pull request so that your hosting publishes the new version.
 Сайт розгортається як завжди, але ця версія також змінює базу даних Supabase і додає
 серверну функцію. Ці частини не розгортаються разом із сайтом, тому виконайте їх вручну,
 **саме в такому порядку**. Якщо новий сайт запрацює раніше, ніж виконано кроки 1 і 2,
-ніхто не зможе увійти в адмін-панель.
+ніхто не зможе увійти в адмін-панель. Від кроку 1 і доки не запрацює новий сайт (крок 4),
+адмін-панель, яка працює зараз, відкривається, але не може нічого зберегти, тоді як
+публічна сторінка працює як звичайно, тож виконайте кроки 1–4 за один раз.
 
 ### 1. Застосуйте міграції бази даних
 
@@ -112,13 +135,31 @@ Merge the pull request so that your hosting publishes the new version.
 
 Файл ролей можна безпечно запускати повторно. Не запускайте перший файл знову після
 файлу ролей, бо це повертає його старі перевірки адміністраторів; якщо так сталося,
-запустіть файл ролей ще раз. Якщо у виводі є попередження, що якоїсь таблиці не існує,
-створіть цю таблицю й запустіть файл ролей ще раз, бо відсутня таблиця пропускається і
-залишається без захисту.
+запустіть файл ролей ще раз.
 
 Замість цього можна скористатися [Supabase CLI](https://supabase.com/docs/guides/cli) і
 виконати `supabase db push` після того, як під'єднаєте проєкт на кроці 3. Команда
 запитає пароль бази даних і застосує міграції, які ще не виконувалися.
+
+У будь-якому разі потім перевірте, що кожна таблиця отримала захист. Виконайте цей запит
+у SQL Editor; він не має повернути жодного рядка:
+
+```sql
+select t as unprotected_table
+from unnest(array['player_config', 'hidden_players', 'achievements', 'player_achievements',
+                  'rating_groups', 'rating_adjustments', 'settings', 'matches', 'admin_log']) as t
+where not coalesce((select c.relrowsecurity from pg_class c
+                    where c.oid = to_regclass('public.' || t)), false)
+   or (select count(*) from pg_policies p
+       where p.schemaname = 'public' and p.tablename = t
+         and p.policyname in ('esb_perm_only_insert', 'esb_perm_only_update',
+                              'esb_perm_only_delete')) < 3;
+```
+
+Кожен рядок називає таблицю без захисту, найчастіше тому, що її не існувало, коли
+запускався файл ролей: таку таблицю пропущено лише з попередженням, якого SQL Editor може
+не показати. Створіть цю таблицю, запустіть файл ролей ще раз, а потім знову виконайте
+цю перевірку.
 
 ### 2. Зробіть себе super admin
 
@@ -172,8 +213,9 @@ supabase functions deploy admin-users --no-verify-jwt
   може змінити.
 - **Синхронізація матчів:** якщо ви використовуєте функцію `esb-sync`, її можна
   захистити: виконайте `supabase secrets set SYNC_SECRET=<випадкове значення>` і повторно
-  розгорніть її командою `supabase functions deploy esb-sync --no-verify-jwt`. Після цього
-  все, що її викликає, має надсилати заголовок `x-sync-secret`.
+  розгорніть її командою `supabase functions deploy esb-sync --no-verify-jwt` (прапорець
+  потрібен із тієї самої причини, що й на кроці 3; секрет функція перевіряє сама). Після
+  цього все, що її викликає, має надсилати заголовок `x-sync-secret`.
 
 ### Якщо щось пішло не так
 

@@ -35,9 +35,10 @@
 --   Paste this file into the Supabase SQL editor and run it, or run
 --   `supabase db push`. It is idempotent and works whether or not the first
 --   migration has been applied. A site table that does not exist yet is skipped
---   with a warning; run the file again after creating it. Do not run the first
---   migration again after this one (it would bring back its admin_users checks);
---   if you did, run this one again.
+--   with a warning; run the file again after creating it (the check query in
+--   DEPLOY.md, step 1, lists such tables). Do not run the first migration again
+--   after this one (it would bring back its admin_users checks); if you did, run
+--   this one again.
 --
 -- How to add a super admin by email (the user must exist under
 -- Authentication > Users)
@@ -320,6 +321,11 @@ create trigger esb_user_roles_stamp
 -- This also blocks deleting the last super admin's auth user (the cascade deletes
 -- their user_roles row). AFTER ... FOR EACH ROW sees the whole statement's result.
 -- SQLSTATE PT409 makes PostgREST answer HTTP 409.
+-- Concurrency: two transactions removing two different super admins at the same time
+-- would each still see the other's row and both pass. So a removal of a super admin
+-- first takes one transaction-level advisory lock, which makes the second wait until
+-- the first commits or rolls back; its check then runs as a new statement with a fresh
+-- snapshot (READ COMMITTED, the default) and sees the first removal.
 create or replace function private.user_roles_keep_super()
 returns trigger
 language plpgsql
@@ -327,14 +333,16 @@ security definer
 set search_path = ''
 as $$
 begin
-  if exists (select 1 from public.roles r where r.id = old.role_id and r.is_super)
-     and not exists (
-       select 1
-       from public.user_roles ur
-       join public.roles r on r.id = ur.role_id
-       where r.is_super
-     )
-  then
+  if not exists (select 1 from public.roles r where r.id = old.role_id and r.is_super) then
+    return null;
+  end if;
+  perform pg_advisory_xact_lock(hashtext('esb_last_super_admin'));
+  if not exists (
+    select 1
+    from public.user_roles ur
+    join public.roles r on r.id = ur.role_id
+    where r.is_super
+  ) then
     raise exception 'Cannot remove the last super admin' using errcode = 'PT409';
   end if;
   return null;

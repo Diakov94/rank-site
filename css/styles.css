@@ -100,10 +100,16 @@ h1, h2, h3 { letter-spacing: -0.01em; }
   gap: 16px;
   padding: 16px 0 28px;
 }
-/* The 3 columns need 1112px (340 + 480 + 260 + 2 gaps) plus the scrollbar */
-@media (max-width: 1150px) {
-  .grid { grid-template-columns: 1fr; }
-  canvas { width: 100%; height: auto; }
+/* Desktop (>= 1100px): 3 columns. The grid spans the viewport less its scrollbar, up to 1180px
+ * (this padding shorthand drops .container's side gutter). The first column stays at its 340px
+ * minimum, the last is 260px, and the middle one gets the rest: grid width - 632px (with the two
+ * 16px gaps). Its 480px minimum needs a 1112px grid, 1129px of viewport with a 17px scrollbar, so
+ * at 1100-1150px (a 1083-1150px grid) the minimum drops to 440px, so the 3 columns need only
+ * 1072px: the middle column keeps shrinking the same way and all 3 fit. From 1129px up both
+ * minimums give the same widths. Under 1100px the tablet and phone layouts take over (see the
+ * end of this file). */
+@media (min-width: 1100px) and (max-width: 1150px) {
+  .grid { grid-template-columns: minmax(340px, 1fr) minmax(440px, 2.2fr) 260px; }
 }
 
 /* ========== Inputs ========== */
@@ -190,7 +196,7 @@ tbody tr:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px;
 
 /* ========== Stats ========== */
 .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 10px; }
-@media (max-width: 1100px) { .stats { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 1099.98px) { .stats { grid-template-columns: repeat(2, 1fr); } }
 .stat {
   padding: 10px 12px;
   border-radius: var(--radius-md);
@@ -246,7 +252,7 @@ tbody tr:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px;
   border-radius: var(--radius-md); border: 1px solid var(--card-border);
   background: var(--chart-bg);
 }
-@media (max-width: 1100px) { .chartWrap { height: 300px; } }
+@media (max-width: 1099.98px) { .chartWrap { height: 300px; } }
 #chart { display: block; width: 100%; height: 100%; cursor: crosshair; }
 .chartTip {
   position: absolute; z-index: 5;
@@ -528,8 +534,8 @@ body::after {
 }
 
 /* ========== Tablet and phone (< 1100px) ==========
- * Every responsive rule sits in a max-width query, so the desktop layout (>= 1100px) is
- * untouched, and uses public-page selectors, since admin.html loads this file too.
+ * Every rule here sits in a max-width query, so the desktop layout (>= 1100px, 3 columns; see
+ * .grid) is untouched, and uses public-page selectors, since admin.html loads this file too.
  * Breakpoints (scrollToProfile in js/app.js uses the same): phone < 768px, tablet 768-1099px. */
 @media (max-width: 1099.98px) {
   /* Keep the 16px side gutter (.grid's padding shorthand otherwise zeroes .container's), and

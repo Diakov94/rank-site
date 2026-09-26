@@ -21,8 +21,8 @@ const st = {
   resetSaving: false,
   access: null,        // what the account may do, from fetchAccess(); null outside the panel
   users: [],           // Users tab: [{ id, email, created_at, last_sign_in_at, role_id }]
-  roleData: null,      // Users and Roles tabs: loadRoleData() result
-  roleUserCounts: null, // Roles tab: Map role id -> number of users, or null when unknown
+  roleData: null,      // loadRoleData() result, loaded by the open tab (Users or Roles)
+  roleUserCounts: null, // Roles tab: Map role id -> number of users, null until the tab loads
   creatingUser: false,
 };
 
@@ -43,6 +43,7 @@ const adminSearch   = document.getElementById("adminSearch");
  * The session lives in localStorage[ADMIN_SESSION_KEY]. Every admin request sends its
  * access token; the database policies decide what the account may do. */
 var SESSION_EXPIRED_MSG = "Session expired. Log in again.";
+var OTHER_ACCOUNT_MSG = "You signed in as another account in another tab. Log in again.";
 var refreshInFlight = null;
 
 /* `fallback` ({ email, user_id }) fills what the auth response leaves out. */
@@ -85,11 +86,26 @@ function adminEmail() {
   return (st.session && st.session.email) || null;
 }
 
+/* Whether sessions `a` and `b` belong to the same user: by user id when both have one (older
+ * stored sessions lack it), else by email, ignoring case. */
+function sameSessionUser(a, b) {
+  if (a.user_id && b.user_id) return a.user_id === b.user_id;
+  var email = String(a.email || "").toLowerCase();
+  return !!email && email === String(b.email || "").toLowerCase();
+}
+
 /* A valid access token, refreshed first when it expires within a minute. */
 async function getAccessToken() {
   if (!st.session) throw new Error("Not logged in.");
-  /* Another tab may already have refreshed (and so rotated) the session. */
   var stored = readStoredSession();
+  if (stored && !sameSessionUser(stored, st.session)) {
+    /* Another tab signed in as someone else, so this tab's session is gone. Only this tab
+     * forgets it: the stored session is the other tab's. */
+    st.session = null;
+    showLoginScreen(OTHER_ACCOUNT_MSG);
+    throw new Error(OTHER_ACCOUNT_MSG);
+  }
+  /* Another tab may already have refreshed (and so rotated) the session. */
   if (stored && Number(stored.expires_at) > Number(st.session.expires_at)) st.session = stored;
   if (!(Number(st.session.expires_at) - 60 > Math.floor(Date.now() / 1000))) return refreshSession();
   return st.session.access_token;
@@ -279,6 +295,7 @@ function errorText(err, action, conflict) {
 
 /* ===== Auth ===== */
 var loginPending = false;
+var panelEntered = false; // the panel was opened on this page (set by enterPanel)
 
 async function tryLogin() {
   if (loginPending) return;
@@ -296,6 +313,7 @@ async function tryLogin() {
   st.access = null;
   loginBtn.disabled = true;
   loginBtn.textContent = "Checking…";
+  var reloading = false;
   try {
     var auth = await requestAuthToken("password", { email: email, password: password });
     var res = auth.res, data = auth.data;
@@ -321,15 +339,28 @@ async function tryLogin() {
     }
     st.access = access;
     passwordInput.value = "";
+    /* After a session ended in an open panel, the page still holds the previous account's
+     * data (users, roles, log). Start from a clean page instead: it resumes the session just
+     * stored and checks its access again. Without storage the session would not survive the
+     * reload, so the panel opens in place as on a first login. */
+    var stored = readStoredSession();
+    if (panelEntered && stored && st.session && stored.access_token === st.session.access_token) {
+      reloading = true;
+      await writeLog("Logged in", adminEmail()); // before the reload cancels the request
+      location.reload();
+      return;
+    }
     writeLog("Logged in", adminEmail());
     enterPanel();
   } catch (e) {
     console.error("Login error:", e);
     showLoginError("Connection error. Try again.");
   } finally {
-    loginPending = false;
-    loginBtn.disabled = false;
-    loginBtn.textContent = "Log in";
+    if (!reloading) { // otherwise the form stays busy until the page reloads
+      loginPending = false;
+      loginBtn.disabled = false;
+      loginBtn.textContent = "Log in";
+    }
   }
 }
 
@@ -346,24 +377,6 @@ async function checkIsAdmin() {
  * own; hiding a control only keeps the panel honest about what will work. */
 var ACCESS_CHECK_FAILED_MSG = "Could not verify admin access. Try again.";
 
-/* The fixed permission list of the roles migration (the permissions table holds the same
- * keys and labels). Used when the table cannot be read and for the legacy fallback. */
-var ADMIN_PERMISSIONS = [
-  { key: "players.edit",       label: "Add and delete players" },
-  { key: "players.visibility", label: "Hide and show players" },
-  { key: "avatars.upload",     label: "Upload player photos" },
-  { key: "achievements.edit",  label: "Create, edit and delete achievements" },
-  { key: "badges.assign",      label: "Assign achievements to players" },
-  { key: "groups.edit",        label: "Edit rating groups" },
-  { key: "reset.run",          label: "Save monthly resets" },
-  { key: "adjustments.edit",   label: "Add and delete rating adjustments" },
-  { key: "formula.edit",       label: "Edit the rating formula" },
-  { key: "log.read",           label: "Read the activity log" },
-  { key: "log.clear",          label: "Clear the activity log" },
-  { key: "users.manage",       label: "Create and delete users, assign roles" },
-];
-var ALL_PERMISSION_KEYS = ADMIN_PERMISSIONS.map(function(p) { return p.key; });
-
 /* Every tab in display order, and the permission a tab needs (tabs not listed are open to
  * every role). The Roles tab is for the super admin only (see tabAllowed). */
 var TAB_IDS = ["players", "achievements", "dashboard", "log", "groups", "reset", "adjustments", "formula", "users", "roles"];
@@ -377,9 +390,11 @@ var TAB_PERMISSIONS = {
 };
 
 /* What the signed-in account may do: { role, permissions, legacy }. role is
- * { id, name, is_super } or null (no access); permissions is a Set of keys. legacy: the roles
- * migration is not applied yet (there is no my_access RPC), so public.is_admin() decides and
- * an admin gets every permission. Throws when access cannot be verified; callers sign out. */
+ * { id, name, is_super } or null (no access); permissions is a Set of the keys my_access()
+ * returned (can() does not read it for a super role, which holds every permission). legacy:
+ * the roles migration is not applied yet (there is no my_access RPC), so public.is_admin()
+ * decides and an admin is a super admin. Throws when access cannot be verified; callers sign
+ * out. */
 async function fetchAccess() {
   var data;
   try {
@@ -389,7 +404,7 @@ async function fetchAccess() {
     var legacyAdmin = await checkIsAdmin();
     return {
       role: legacyAdmin ? { id: null, name: "Admin", is_super: true } : null,
-      permissions: new Set(legacyAdmin ? ALL_PERMISSION_KEYS : []),
+      permissions: new Set(),
       legacy: true,
     };
   }
@@ -403,12 +418,11 @@ function parseAccess(data) {
   var role = data.role;
   if (role === null || role === undefined) return { role: null, permissions: new Set(), legacy: false };
   if (typeof role !== "object" || Array.isArray(role)) throw new Error("Unexpected my_access response");
-  var isSuper = role.is_super === true;
   var keys = (Array.isArray(data.permissions) ? data.permissions : [])
     .filter(function(k) { return typeof k === "string"; });
   return {
-    role: { id: toRoleId(role.id), name: String(role.name ?? "") || "Unnamed role", is_super: isSuper },
-    permissions: new Set(isSuper ? ALL_PERMISSION_KEYS.concat(keys) : keys),
+    role: { id: toRoleId(role.id), name: String(role.name ?? "") || "Unnamed role", is_super: role.is_super === true },
+    permissions: new Set(keys),
     legacy: false,
   };
 }
@@ -495,29 +509,6 @@ function applyAccess() {
   if (!tabAllowed(st.currentTab)) switchTab("players");
 }
 
-/* Asks the database again what the account may do (after a change to the account's own role)
- * and redraws what depends on it. A failure keeps the current view: the database still
- * enforces every write. */
-async function reloadAccess() {
-  var access;
-  try {
-    access = await fetchAccess();
-  } catch (e) {
-    console.warn("Could not reload access:", e);
-    return;
-  }
-  if (!st.session) return;
-  if (!access.role) {
-    await endSession();
-    showLoginScreen(noAccessMessage(access));
-    return;
-  }
-  st.access = access;
-  applyAccess();
-  renderList();
-  renderAchievementsTab();
-}
-
 /* Forget the session here and, best effort, on the server. */
 async function endSession() {
   var token = st.session && st.session.access_token;
@@ -546,6 +537,7 @@ async function logout() {
 /* ===== Panel ===== */
 /* Opens the panel for the account in st.access (set by the caller after fetchAccess). */
 function enterPanel() {
+  panelEntered = true;
   applyAccess();
   loginSection.style.display = "none";
   panelSection.style.display = "block";
@@ -702,8 +694,9 @@ function switchTab(tab) {
     if (btn) btn.classList.toggle("tab-active", key === tab);
     if (sec) sec.style.display = key === tab ? "block" : "none";
   });
-  /* On a narrow screen the tab row scrolls sideways: bring the chosen tab fully into view.
-   * Only the row scrolls, never the page; where every tab fits (desktop) nothing moves. */
+  /* On a narrow touch screen the tab row scrolls sideways (with a mouse it wraps instead, see
+   * admin.css): bring the chosen tab fully into view. Only the row scrolls, never the page;
+   * where every tab fits (desktop, or a wrapped row) nothing moves. */
   var activeTab = document.getElementById(tabDomId("tab", tab));
   var tabRow = activeTab && activeTab.parentElement;
   if (tabRow && tabRow.scrollWidth > tabRow.clientWidth) {
@@ -2032,7 +2025,7 @@ function monthGridHtml(players) {
 
 /* ===== Roles data (Users and Roles tabs) ===== */
 /* Shown in both tabs while the database has no roles yet (legacy access, see fetchAccess). */
-var ROLES_MIGRATION_MSG = "User and role management needs the roles migration. Apply it (see supabase/migrations and the README), then log in again.";
+var ROLES_MIGRATION_MSG = "User and role management needs the roles migration. Apply it (see DEPLOY.md), then log in again.";
 
 /* The permissions, the roles and what each role holds, read with the admin's token (staff may
  * read all three). Returns { permissions: [{ key, label, description }], roles: [{ id, name,
@@ -2047,9 +2040,6 @@ async function loadRoleData() {
   var permissions = results[0]
     .filter(function(p) { return p && typeof p.key === "string"; })
     .map(function(p) { return { key: p.key, label: String(p.label || p.key), description: String(p.description || "") }; });
-  if (!permissions.length) {
-    permissions = ADMIN_PERMISSIONS.map(function(p) { return { key: p.key, label: p.label, description: "" }; });
-  }
   var roles = results[1]
     .filter(function(r) { return r && toRoleId(r.id) !== null; })
     .map(function(r) {
@@ -2187,7 +2177,9 @@ function roleNameOf(roleId) {
 
 async function loadUsersTab() {
   var list = document.getElementById("userList");
-  if (!list) return;
+  /* Only for the open tab (createUser reloads it after a request the admin may have left):
+   * it clears st.roleData, which the Roles tab would otherwise be using. */
+  if (!list || st.currentTab !== "users") return;
   var seq = ++usersLoadSeq;
   var legacy = !!(st.access && st.access.legacy);
   setHidden("createUserForm", legacy);
@@ -2200,7 +2192,9 @@ async function loadUsersTab() {
   fillNewUserRoleSelect();
   try {
     var results = await Promise.all([loadRoleData(), callAdminUsers({ action: "list" })]);
-    if (seq !== usersLoadSeq) return; // a newer load replaced this one
+    /* A newer load replaced this one, or the Roles tab now owns st.roleData (the Users tab
+     * loads again when it is opened). */
+    if (seq !== usersLoadSeq || st.currentTab !== "users") return;
     st.roleData = results[0];
     st.users = normalizeUsers(results[1] && results[1].users);
     fillNewUserRoleSelect();
@@ -2450,22 +2444,19 @@ async function loadRolesTab() {
   }
   list.innerHTML = '<p class="loading-msg">Loading…</p>';
   try {
-    /* Other people's user_roles rows are readable only with users.manage; without it the
-     * number of users per role is left out. */
     var results = await Promise.all([
       loadRoleData(),
-      can("users.manage") ? adminRows("user_roles", "user_id,role_id", "user_id.asc") : Promise.resolve(null),
+      adminRows("user_roles", "user_id,role_id", "user_id.asc"),
     ]);
-    if (seq !== rolesLoadSeq) return; // a newer load replaced this one
+    /* A newer load replaced this one, or the Users tab now owns st.roleData (the Roles tab
+     * loads again when it is opened). */
+    if (seq !== rolesLoadSeq || st.currentTab !== "roles") return;
     st.roleData = results[0];
-    st.roleUserCounts = null;
-    if (results[1]) {
-      st.roleUserCounts = new Map();
-      results[1].forEach(function(r) {
-        var id = toRoleId(r && r.role_id);
-        if (id !== null) st.roleUserCounts.set(id, (st.roleUserCounts.get(id) || 0) + 1);
-      });
-    }
+    st.roleUserCounts = new Map();
+    results[1].forEach(function(r) {
+      var id = toRoleId(r && r.role_id);
+      if (id !== null) st.roleUserCounts.set(id, (st.roleUserCounts.get(id) || 0) + 1);
+    });
     renderRoles();
   } catch (e) {
     if (seq !== rolesLoadSeq) return;
@@ -2486,8 +2477,9 @@ function renderRoles() {
   list.replaceChildren(frag);
 }
 
-/* One role: name, description, users, and a checkbox per permission. Only permissions the
- * account holds can be switched; the super role is locked. */
+/* One role: name, description, number of users, and a checkbox per permission. The viewer is
+ * the super admin (the only one who sees this tab) and may switch every permission; the super
+ * role itself is locked. */
 function makeRoleCard(role) {
   var count = st.roleUserCounts ? (st.roleUserCounts.get(role.id) || 0) : null;
   var card = document.createElement("div");
@@ -2526,16 +2518,12 @@ function makeRoleCard(role) {
 
   var perms = card.querySelector(".role-perms");
   st.roleData.permissions.forEach(function(perm) {
-    var held = can(perm.key);
     var label = document.createElement("label");
-    label.className = "role-perm" + (held ? "" : " role-perm--off");
-    label.title = held
-      ? (perm.description ? perm.description + " " : "") + "(" + perm.key + ")"
-      : "You don't have this permission, so you cannot grant or remove it.";
+    label.className = "role-perm";
+    label.title = (perm.description ? perm.description + " " : "") + "(" + perm.key + ")";
     var box = document.createElement("input");
     box.type = "checkbox";
     box.checked = role.permissions.has(perm.key);
-    box.disabled = !held;
     var text = document.createElement("span");
     text.textContent = perm.label;
     label.append(box, text);
@@ -2563,15 +2551,9 @@ function makeRoleCard(role) {
   return card;
 }
 
-/* Grants or removes one permission of a role. A change to the account's own role changes
- * what the account may do, so its access is loaded again. */
+/* Grants or removes one permission of a role (never the super role, which has no checkboxes). */
 async function toggleRolePermission(role, perm, box) {
   var grant = box.checked;
-  var own = isOwnRole(role);
-  if (!grant && own && !confirm('"' + role.name + '" is your own role. Removing "' + perm.label + '" takes this permission away from you too. Continue?')) {
-    box.checked = true;
-    return;
-  }
   box.disabled = true;
   try {
     if (grant) {
@@ -2589,15 +2571,11 @@ async function toggleRolePermission(role, perm, box) {
       role.permissions.delete(perm.key);
     }
     writeLog("Role updated", role.name + ": " + (grant ? "granted" : "removed") + ' "' + perm.label + '"');
-    if (own) {
-      await reloadAccess();
-      if (st.currentTab === "roles") renderRoles();
-    }
   } catch (e) {
     box.checked = !grant;
     alert(errorText(e, grant ? "grant this permission" : "remove this permission"));
   } finally {
-    box.disabled = !can(perm.key);
+    box.disabled = false;
   }
 }
 
@@ -2626,10 +2604,7 @@ async function saveRole(role, card) {
     if (role.name !== oldName) changes.push('renamed from "' + oldName + '"');
     if (role.description !== oldDescription) changes.push("description changed");
     writeLog("Role updated", role.name + ": " + (changes.join(", ") || "saved"));
-    if (isOwnRole(role)) {
-      st.access.role.name = role.name; // the header shows it
-      applyAccess();
-    }
+    if (!st.roleData) return; // being loaded again (see loadUsersTab); opening the tab redraws it
     st.roleData.roles.sort(compareRoles);
     renderRoles();
   } catch (e) {
@@ -2645,7 +2620,9 @@ async function deleteRole(role, card) {
   try {
     await adminRequest("/rest/v1/roles?id=eq." + encodeURIComponent(role.id), { method: "DELETE", mustMatch: true });
     writeLog("Role deleted", role.name);
-    st.roleData.roles = st.roleData.roles.filter(function(r) { return r !== role; });
+    if (!st.roleData) return; // being loaded again (see loadUsersTab); opening the tab redraws it
+    /* By id: st.roleData may have been loaded again since this card was drawn. */
+    st.roleData.roles = st.roleData.roles.filter(function(r) { return r.id !== role.id; });
     st.roleData.byId.delete(role.id);
     renderRoles();
   } catch (e) {

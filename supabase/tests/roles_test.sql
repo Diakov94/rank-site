@@ -38,7 +38,11 @@ create table roles_test.users (
   role text
 );
 create table roles_test.flags (name text primary key);
-grant select on roles_test.users, roles_test.flags to anon, authenticated;
+-- Numbers the checks compare against, captured once from the database as the SQL
+-- editor's role (see the test data below), so they follow the migration instead of
+-- being written into the checks.
+create table roles_test.counts (name text primary key, n bigint not null);
+grant select on roles_test.users, roles_test.flags, roles_test.counts to anon, authenticated;
 
 -- Email of a test user.
 create function roles_test.email(p_name text) returns text
@@ -57,6 +61,11 @@ as $$ select r.id from public.roles r where r.name = p_name $$;
 create function roles_test.flag(p_name text) returns boolean
 language sql stable security definer set search_path = ''
 as $$ select exists (select 1 from roles_test.flags f where f.name = p_name) $$;
+
+-- A captured number (null, so the check fails, if it was never captured).
+create function roles_test.expected(p_name text) returns bigint
+language sql stable security definer set search_path = ''
+as $$ select c.n from roles_test.counts c where c.name = p_name $$;
 
 -- Act as a test user, as anon, or as the SQL editor's own role again.
 create function roles_test.login(p_name text) returns void
@@ -168,6 +177,10 @@ $$;
 grant execute on all functions in schema roles_test to anon, authenticated;
 
 -- ── Test data (as the SQL editor's role, which bypasses RLS) ────────────────
+-- How many permissions the migration left (nothing in this test adds or removes one).
+insert into roles_test.counts (name, n)
+select 'permissions', count(*) from public.permissions;
+
 insert into roles_test.users (name, role)
 select v.name, v.role
 from (values
@@ -299,7 +312,7 @@ begin
       and jsonb_typeof(a -> 'permissions') = 'array',
     a::text);
   perform roles_test.expect('my_access: super admin gets every permission key',
-    jsonb_array_length(a -> 'permissions') = 12
+    jsonb_array_length(a -> 'permissions') = roles_test.expected('permissions')
       and (a -> 'permissions') @> '["players.edit", "players.visibility", "avatars.upload",
         "achievements.edit", "badges.assign", "groups.edit", "reset.run", "adjustments.edit",
         "formula.edit", "log.read", "log.clear", "users.manage"]'::jsonb,
@@ -379,7 +392,7 @@ begin
     $q$insert into storage.objects (bucket_id, name) values ('achievements', 'roles_test_vis.png')$q$);
   perform roles_test.expect('an admin can read the roles and the permission list',
     roles_test.scalar('select count(*) from public.roles')::bigint > 0
-      and roles_test.scalar('select count(*) from public.permissions')::bigint = 13
+      and roles_test.scalar('select count(*) from public.permissions')::bigint = roles_test.expected('permissions')
       and roles_test.scalar('select count(*) from public.role_permissions')::bigint > 0,
     null);
   perform roles_test.expect('an admin without users.manage sees only their own user_roles row',

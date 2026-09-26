@@ -9,8 +9,10 @@
  *     my_access() and for the user_roles writes, so RLS and the last-super-admin trigger
  *     check those as the caller.
  * Env (set by Supabase): SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_ANON_KEY.
- * Deploy: supabase functions deploy admin-users (keep JWT verification on: every call
- * carries a user's token).
+ * Deploy: supabase functions deploy admin-users --no-verify-jwt (see DEPLOY.md, step 3).
+ * The flag turns off only the gateway's own JWT check, which rejects valid sign-ins on
+ * projects with Supabase's new API keys, as this one has. The function still checks every
+ * caller's token itself: verifyToken below (auth.getUser), then my_access() as the caller.
  */
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 import { createHandler } from "./handler.js";

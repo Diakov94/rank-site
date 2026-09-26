@@ -36,7 +36,8 @@
 --   The old front end's admin panel writes with the publishable key, so its writes
 --   stop working as soon as step 1 runs; the public page keeps working throughout.
 --
--- Disabling public sign-ups (Authentication > Providers > Email) is recommended but
+-- Disabling public sign-ups (Authentication > Sign In / Providers > Allow new users to
+-- sign up) is recommended but
 -- not required: every write checks admin_users, so a self-registered user cannot
 -- write anything.
 -- ============================================================================
